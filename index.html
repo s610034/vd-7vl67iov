@@ -1,0 +1,1750 @@
+<!DOCTYPE html>
+<html lang="zh-Hant">
+<head>
+<meta charset="UTF-8">
+<title>Vista AI 叢集部署設定產生器</title>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js"></script>
+<style>
+  :root{
+    --bg:#0f1420; --panel:#161d2e; --panel2:#1c2438; --border:#2a3550;
+    --text:#e7ecf7; --muted:#8b96b3; --accent:#4f8cff; --accent2:#38d6b4;
+    --danger:#ff6b6b; --warn:#ffb454;
+  }
+  *{box-sizing:border-box;}
+  body{
+    margin:0; font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Helvetica,Arial,sans-serif;
+    background:var(--bg); color:var(--text); padding:32px 20px 80px;
+  }
+  .wrap{max-width:980px; margin:0 auto;}
+  h1{font-size:22px; margin:0 0 4px;}
+  .sub{color:var(--muted); font-size:13px; margin-bottom:28px;}
+  .card{
+    background:var(--panel); border:1px solid var(--border); border-radius:12px;
+    padding:20px 22px; margin-bottom:18px;
+  }
+  .card h2{font-size:15px; margin:0 0 14px; display:flex; align-items:center; gap:8px;}
+  .card h2 .badge{
+    font-size:11px; background:var(--accent); color:#fff; padding:2px 8px; border-radius:20px;
+    font-weight:600;
+  }
+  label{font-size:12.5px; color:var(--muted); display:block; margin:0 0 4px;}
+  input[type=text],input[type=number],input[type=password],select,textarea{
+    width:100%; background:var(--panel2); border:1px solid var(--border); color:var(--text);
+    padding:8px 10px; border-radius:7px; font-size:13.5px; font-family:inherit;
+  }
+  textarea{resize:vertical; font-family:ui-monospace,SFMono-Regular,Menlo,monospace; font-size:12.5px;}
+  .row{display:grid; grid-template-columns:1fr 1fr; gap:14px; margin-bottom:12px;}
+  .row3{display:grid; grid-template-columns:1fr 1fr 1fr; gap:14px; margin-bottom:12px;}
+  .field{margin-bottom:12px;}
+  .hostgroup{
+    border:1px dashed var(--border); border-radius:9px; padding:12px 14px; margin-bottom:10px;
+    background:rgba(255,255,255,0.015);
+  }
+  .hostgroup-head{display:flex; justify-content:space-between; align-items:center; margin-bottom:8px;}
+  .hostgroup-head strong{font-size:13px;}
+  .count-badge{font-size:11px; color:var(--muted);}
+  .ip-line{display:grid; grid-template-columns:110px 1fr; gap:8px; margin-bottom:6px; align-items:start;}
+  .ip-line span{font-size:12px; color:var(--muted); padding-top:8px;}
+  .spec-row{display:grid; grid-template-columns:1fr 1fr 1fr; gap:8px; margin-top:6px;}
+  .spec-row input{font-size:12px; padding:6px 8px;}
+  .spec-row .u{color:var(--muted); font-size:10.5px; margin-top:2px; display:block;}
+  .spec-warn{font-size:11px; color:var(--warn); margin-top:3px;}
+  button{
+    cursor:pointer; border:none; border-radius:8px; font-weight:600; font-size:13.5px;
+    padding:9px 16px; font-family:inherit;
+  }
+  .btn-primary{background:var(--accent); color:#fff;}
+  .btn-primary:hover{background:#3c78e6;}
+  .btn-ghost{background:transparent; color:var(--muted); border:1px solid var(--border);}
+  .btn-ghost:hover{color:var(--text); border-color:var(--accent);}
+  .actions{display:flex; gap:10px; margin-top:6px;}
+  .hint{font-size:11.5px; color:var(--muted); margin-top:4px; line-height:1.5;}
+  .warn-box{
+    background:rgba(255,180,84,0.08); border:1px solid rgba(255,180,84,0.35);
+    color:var(--warn); font-size:12.5px; padding:10px 12px; border-radius:8px; margin-bottom:16px;
+    line-height:1.6;
+  }
+  .footer-note{font-size:11.5px; color:var(--muted); text-align:center; margin-top:20px;}
+  #status{font-size:12.5px; margin-top:10px; min-height:18px;}
+  #status.ok{color:var(--accent2);}
+  #status.err{color:var(--danger);}
+  .grid-toggle{display:flex; gap:8px; margin-bottom:10px;}
+  .grid-toggle button{flex:1; background:var(--panel2); color:var(--muted); border:1px solid var(--border);}
+  .grid-toggle button.active{background:var(--accent); color:#fff; border-color:var(--accent);}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>🛡️ Vista AI 叢集部署設定產生器</h1>
+  <div class="sub">輸入本次客戶的主機數量與 IP,產生一套完整的 Ansible 部署包(inventory + playbook + 驗收腳本),下載後帶到中央控制機執行即可完成建置。</div>
+
+  <div class="warn-box">
+    ⚠️ 本工具在瀏覽器本機端產生檔案,不會把任何資料送出到外部伺服器。密碼欄位僅用於寫入你下載的設定檔中,請妥善保管下載的 zip,不要上傳到公開空間或分享給不相關人員。
+  </div>
+
+  <div class="card">
+    <h2>基本資訊 <span class="badge">必填</span></h2>
+    <div class="row">
+      <div class="field">
+        <label>客戶名稱 / 專案代號(用於檔案命名,建議英數字)</label>
+        <input type="text" id="customerName" placeholder="例如 acme-corp">
+      </div>
+      <div class="field">
+        <label>SSH 登入帳號</label>
+        <input type="text" id="sshUser" value="billows">
+      </div>
+    </div>
+    <div class="row">
+      <div class="field">
+        <label>SSH 密碼(sudo 密碼一併使用,留空則改為互動輸入)</label>
+        <input type="password" id="sshPass" placeholder="留空 = 部署時互動輸入,較安全">
+      </div>
+      <div class="field">
+        <label>叢集內部認證 key(機器對機器用,留空自動產生隨機值)</label>
+        <input type="text" id="clusterKey" placeholder="留空自動產生 32 字元亂數">
+      </div>
+    </div>
+    <div class="row">
+      <div class="field">
+        <label>Dashboard / OpenSearch admin 登入密碼(你要記住、之後登入用的)</label>
+        <div style="display:flex; gap:6px;">
+          <input type="text" id="opensearchPassInput" placeholder="請自行輸入,或按右側按鈕產生一組">
+          <button type="button" class="btn-ghost" onclick="document.getElementById('opensearchPassInput').value = randomPassword(16)">產生一組</button>
+        </div>
+      </div>
+    </div>
+    <div class="row">
+      <div class="field">
+        <label>虛擬化平台(決定是否產生「宿主機批量塞 IP」腳本)</label>
+        <select id="hvPlatform" onchange="onPlatformChange()">
+          <option value="pve">Proxmox VE / KVM(用 qm guest exec 批量塞 IP,需 VM 已裝 QEMU Guest Agent)</option>
+          <option value="vmware">VMware vSphere(產生 govc/PowerCLI 操作指引,需自行執行)</option>
+          <option value="other">其他平台 / VM 已有 IP(略過此步驟)</option>
+        </select>
+        <div class="hint" id="platformHint"></div>
+      </div>
+    </div>
+  </div>
+
+  <div class="card">
+    <h2>設備數量統計 <span class="badge">先填數量,下方會自動產生對應的填寫表</span></h2>
+    <div class="hint" style="margin-bottom:12px;">依照本次客戶規模填入各角色設備數量,下方詳細填寫區塊會自動依數量展開。VIP 只有在 LB ≥ 2 台(需要做 MASTER/BACKUP 漂移)時才需要,若 LB 只有 1 台則不需要 VIP。</div>
+    <div class="row3">
+      <div class="field">
+        <label>Indexer 數量(建議3,最小1)</label>
+        <input type="number" id="idxCount" value="3" min="1" max="9" onchange="onCountChange('idx')">
+      </div>
+      <div class="field">
+        <label>Manager 數量(含Master,建議3,最小1)</label>
+        <input type="number" id="mgrCount" value="3" min="1" max="9" onchange="onCountChange('mgr')">
+      </div>
+      <div class="field">
+        <label>Dashboard 數量</label>
+        <input type="number" id="dashCount" value="1" min="1" max="3" onchange="onCountChange('dash')">
+      </div>
+    </div>
+    <div class="row3">
+      <div class="field">
+        <label>LB 數量(1 台=不需VIP,≥2 台=需要VIP)</label>
+        <input type="number" id="lbCount" value="2" min="1" max="4" onchange="onCountChange('lb')">
+      </div>
+      <div class="field">
+        <label>NIDS 數量(選填,可填 0)</label>
+        <input type="number" id="nidsCount" value="1" min="0" max="4" onchange="onCountChange('nids')">
+      </div>
+    </div>
+  </div>
+
+  <div class="card">
+    <h2>資源需求統計 <span class="badge">依下方實際填寫即時加總</span></h2>
+    <div class="hint" style="margin-bottom:10px;">初始套用各角色「建議值」計算,下方詳細資料若有調整 CPU/RAM/磁碟,這裡會同步更新加總。</div>
+    <table style="width:100%; border-collapse:collapse; font-size:13px;">
+      <thead>
+        <tr style="text-align:left; color:var(--muted); border-bottom:1px solid var(--border);">
+          <th style="padding:6px 4px;">角色</th>
+          <th style="padding:6px 4px;">台數</th>
+          <th style="padding:6px 4px;">CPU 合計(核)</th>
+          <th style="padding:6px 4px;">RAM 合計(GB)</th>
+          <th style="padding:6px 4px;">OS Disk 合計</th>
+          <th style="padding:6px 4px;">Data Disk 合計</th>
+        </tr>
+      </thead>
+      <tbody id="resourceSummaryBody"></tbody>
+      <tfoot>
+        <tr style="border-top:1px solid var(--border); font-weight:700;">
+          <td style="padding:8px 4px;">總計</td>
+          <td style="padding:8px 4px;" id="rsTotalCount">-</td>
+          <td style="padding:8px 4px;" id="rsTotalCpu">-</td>
+          <td style="padding:8px 4px;" id="rsTotalRam">-</td>
+          <td style="padding:8px 4px;" id="rsTotalOsDisk">-</td>
+          <td style="padding:8px 4px;" id="rsTotalDataDisk">-</td>
+        </tr>
+      </tfoot>
+    </table>
+  </div>
+
+  <div class="card">
+    <h2>IP 使用列表 <span class="badge">依下方填寫即時彙整,重複 IP 會標紅提醒</span></h2>
+    <table style="width:100%; border-collapse:collapse; font-size:13px;">
+      <thead>
+        <tr style="text-align:left; color:var(--muted); border-bottom:1px solid var(--border);">
+          <th style="padding:6px 4px;">角色</th>
+          <th style="padding:6px 4px;">主機名稱</th>
+          <th style="padding:6px 4px;">IP</th>
+        </tr>
+      </thead>
+      <tbody id="ipListBody"></tbody>
+    </table>
+    <div id="ipDupWarn" class="hint" style="color:var(--danger); display:none;"></div>
+  </div>
+
+  <div class="card">
+    <h2>Indexer 詳細資料(儲存叢集) <span class="badge" id="idxCountBadge"></span></h2>
+    <div class="hint" style="margin-bottom:10px;">正式環境建議 3 台以上以具備容錯能力;最精簡版本(POC/小型環境)可接受 1 台,但無高可用性。</div>
+    <div id="idxHosts"></div>
+  </div>
+
+  <div class="card">
+    <h2>Manager 詳細資料 <span class="badge" id="mgrCountBadge"></span></h2>
+    <div class="hint" style="margin-bottom:10px;">第 1 台自動視為 Master,其餘為 Worker。最精簡版本可只設 1 台(僅 Master)。</div>
+    <div id="mgrHosts"></div>
+  </div>
+
+  <div class="card">
+    <h2>Dashboard 詳細資料 <span class="badge" id="dashCountBadge"></span></h2>
+    <div id="dashHosts"></div>
+  </div>
+
+  <div class="card" id="vipCard">
+    <h2>網路設定 / VIP <span class="badge" id="vipBadge">LB ≥ 2 台時需要 VIP</span></h2>
+    <div class="hint" style="margin-bottom:10px;">這組資料跟 LB 是同一組設定,故排在 LB 詳細資料上方。</div>
+    <div class="row">
+      <div class="field">
+        <label>DNS 伺服器</label>
+        <input type="text" id="dnsServer" placeholder="例如 8.8.8.8 或客戶內部 DNS IP">
+      </div>
+      <div class="field">
+        <label>Gateway(預設閘道)</label>
+        <input type="text" id="gatewayAddr" placeholder="例如 192.168.168.254">
+      </div>
+    </div>
+    <div id="vipFields">
+      <div class="row">
+        <div class="field">
+          <label>Virtual IP (VIP)</label>
+          <input type="text" id="vipAddr" placeholder="例如 192.168.168.137">
+        </div>
+        <div class="field">
+          <label>網段 CIDR 遮罩</label>
+          <input type="text" id="vipCidr" value="24">
+        </div>
+      </div>
+    </div>
+    <div id="vipSkipNote" class="hint" style="display:none;">目前 LB 只有 1 台,不需要 VIP 漂移機制,此欄位已略過。若之後擴充為 2 台以上 LB,再回來填寫。</div>
+  </div>
+
+  <div class="card">
+    <h2>負載平衡 LB 詳細資料(HAProxy + Keepalived) <span class="badge" id="lbCountBadge"></span></h2>
+    <div id="lbHosts"></div>
+  </div>
+
+  <div class="card">
+    <h2>NIDS 詳細資料(Suricata,選填) <span class="badge" id="nidsCountBadge"></span></h2>
+    <div id="nidsHosts"></div>
+  </div>
+
+  <div class="card">
+    <h2>產生設定包</h2>
+    <div class="hint">會產出:inventory.yml、group_vars/all.yml、site.yml(主 playbook)、roles 內各角色 tasks、verify.yml(驗收腳本)、deploy.sh(一鍵執行入口)、README.md。全部打包成一個 zip。</div>
+    <div class="actions">
+      <button class="btn-primary" onclick="generatePackage()">📦 產生並下載部署包</button>
+      <button class="btn-ghost" onclick="previewInventory()">👁 預覽 inventory.yml</button>
+    </div>
+    <div id="status"></div>
+    <div id="credsBox" style="display:none; margin-top:14px; background:var(--panel2); border:1px solid var(--accent); border-radius:8px; padding:14px 16px;">
+      <div style="font-weight:700; font-size:13px; margin-bottom:10px; color:var(--accent2);">🔑 本次產生的登入資訊(請立即記錄,離開頁面後不會再顯示)</div>
+      <div class="row" style="margin-bottom:8px;">
+        <div>
+          <label>Dashboard / OpenSearch admin 密碼</label>
+          <div style="display:flex; gap:6px;">
+            <input type="text" id="credOpensearchPass" readonly style="font-family:ui-monospace,monospace;">
+            <button class="btn-ghost" onclick="copyCred('credOpensearchPass')">複製</button>
+          </div>
+        </div>
+        <div>
+          <label>Cluster Key(機器對機器用,通常不需記錄)</label>
+          <div style="display:flex; gap:6px;">
+            <input type="text" id="credClusterKey" readonly style="font-family:ui-monospace,monospace;">
+            <button class="btn-ghost" onclick="copyCred('credClusterKey')">複製</button>
+          </div>
+        </div>
+      </div>
+      <div class="hint">這組密碼同時也已寫入 zip 內的 group_vars/all.yml,兩處內容一致。部署完成後,建議透過 wazuh-passwords-tool.sh 再更換一次正式密碼。</div>
+    </div>
+    <textarea id="previewBox" style="display:none; width:100%; height:260px; margin-top:12px;"></textarea>
+  </div>
+
+  <div class="footer-note">Vista AI 內部工具原型 · 產出內容執行前請先於測試環境驗證</div>
+</div>
+
+<script>
+const ROLE_LABELS = {
+  idx: {prefix:'Indexer', portHint:'9200/9300', cpuMin:4, cpuRec:8, ramMin:8, ramRec:16, osDiskDef:100, dataDiskMin:2000, dataDiskRec:4000, dataDiskUnitDefault:'TB', defaultCount:3},
+  mgr: {prefix:'Manager', portHint:'1514/1515/1516/55000', cpuMin:2, cpuRec:8, ramMin:4, ramRec:8, osDiskDef:100, dataDiskMin:100, dataDiskRec:100, dataDiskUnitDefault:'GB', defaultCount:3},
+  dash:{prefix:'Dashboard', portHint:'443', cpuMin:4, cpuRec:8, ramMin:8, ramRec:16, osDiskDef:20, dataDiskMin:20, dataDiskRec:20, dataDiskUnitDefault:'GB', defaultCount:1},
+  lb:  {prefix:'LB', portHint:'1514/1515/514/55000', cpuMin:2, cpuRec:2, ramMin:2, ramRec:4, osDiskDef:50, dataDiskMin:50, dataDiskRec:50, dataDiskUnitDefault:'GB', defaultCount:2},
+  nids:{prefix:'NIDS', portHint:'agent', cpuMin:8, cpuRec:16, ramMin:16, ramRec:32, osDiskDef:50, dataDiskMin:1000, dataDiskRec:2000, dataDiskUnitDefault:'TB', defaultCount:1}
+};
+// 對照客戶提供的「規格項目(最低/建議)」表: Manager 2/8核 4/8G, Worker 2/8核 4/8G (併入 mgr 群組),
+// Indexer 4/8核 8/16G / 資料碟 2~4TB, LB 2/2核 2/4G, Dashboard 4/8核 8/16G, NIDS 8/16核 16/32G / 1~2TB
+// 最小可接受部署: Indexer=1台、Manager=1台(僅 Master,不含 Worker) 亦允許,不強制最少3台
+
+function renderHostGroup(role){
+  const count = parseInt(document.getElementById(role+'Count').value)||0;
+  const container = document.getElementById(role+'Hosts');
+  const meta = ROLE_LABELS[role];
+
+  // 保留使用者已輸入的值
+  const blocks = [...container.querySelectorAll('.ip-line')];
+  const existing = blocks.map(b=>({
+    name: b.querySelector('.hostname-input')?.value || '',
+    ip: b.querySelector('.ip-input')?.value || '',
+    vmid: b.querySelector('.vmid-input')?.value || '',
+    cpu: b.querySelector('.cpu-input')?.value || '',
+    ram: b.querySelector('.ram-input')?.value || '',
+    osdisk: b.querySelector('.osdisk-input')?.value || '',
+    osdiskUnit: b.querySelector('.osdisk-unit')?.value || '',
+    datadisk: b.querySelector('.datadisk-input')?.value || '',
+    datadiskUnit: b.querySelector('.datadisk-unit')?.value || '',
+  }));
+
+  let html = '';
+  for(let i=0;i<count;i++){
+    let roleTag = '';
+    if(role==='mgr') roleTag = i===0 ? ' (Master)' : ' (Worker)';
+    if(role==='lb') roleTag = i===0 ? ' (MASTER 優先)' : ' (BACKUP)';
+    const defaultName = meta.prefix + (i+1) + (role==='mgr' && i===0 ? '-Master' : '');
+    const e = existing[i] || {};
+    const defaultDataDiskUnit = e.datadiskUnit || meta.dataDiskUnitDefault;
+    const defaultDataDiskValue = e.datadisk || (defaultDataDiskUnit==='TB' ? (meta.dataDiskRec/1000) : meta.dataDiskRec);
+    html += `<div class="ip-line">
+      <span>${meta.prefix} ${i+1}${roleTag}</span>
+      <div>
+        <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;">
+          <input type="text" class="hostname-input" placeholder="主機名稱 例如 Vista-Indexer1" value="${e.name||defaultName}">
+          <input type="text" class="ip-input" placeholder="IP 位址 例如 10.9.55.85" value="${e.ip||''}">
+        </div>
+        <div class="vmid-wrap" style="display:grid;grid-template-columns:1fr;gap:8px;margin-top:6px;">
+          <input type="text" class="vmid-input" placeholder="PVE VM ID(例如 104)" value="${e.vmid||''}">
+        </div>
+        <div class="spec-row" style="grid-template-columns:1fr 1fr 1fr 1fr;">
+          <div>
+            <input type="number" class="cpu-input" placeholder="CPU 核心" min="1" value="${e.cpu||meta.cpuRec}">
+            <span class="u">CPU 核 (最低${meta.cpuMin}/建議${meta.cpuRec})</span>
+          </div>
+          <div>
+            <input type="number" class="ram-input" placeholder="RAM GB" min="1" value="${e.ram||meta.ramRec}">
+            <span class="u">RAM GB (最低${meta.ramMin}/建議${meta.ramRec})</span>
+          </div>
+          <div>
+            <input type="number" class="osdisk-input" placeholder="OS Disk" min="1" step="any" value="${e.osdisk||meta.osDiskDef}">
+            <div style="display:flex;align-items:center;gap:4px;margin-top:3px;">
+              <select class="osdisk-unit" style="padding:3px 4px;font-size:11px;">
+                <option value="GB" ${(e.osdiskUnit||'GB')==='GB'?'selected':''}>GB</option>
+                <option value="TB" ${(e.osdiskUnit||'GB')==='TB'?'selected':''}>TB</option>
+              </select>
+              <span class="u" style="margin-top:0;">OS Disk</span>
+            </div>
+          </div>
+          <div>
+            <input type="number" class="datadisk-input" placeholder="Data Disk" min="1" step="any" value="${defaultDataDiskValue}">
+            <div style="display:flex;align-items:center;gap:4px;margin-top:3px;">
+              <select class="datadisk-unit" style="padding:3px 4px;font-size:11px;">
+                <option value="GB" ${(e.datadiskUnit||meta.dataDiskUnitDefault)==='GB'?'selected':''}>GB</option>
+                <option value="TB" ${(e.datadiskUnit||meta.dataDiskUnitDefault)==='TB'?'selected':''}>TB</option>
+              </select>
+              <span class="u" style="margin-top:0;">資料碟 (最低${meta.dataDiskMin}GB/建議${meta.dataDiskRec}GB)</span>
+            </div>
+          </div>
+        </div>
+        <div class="spec-warn" data-warn-for="${role}-${i}"></div>
+      </div>
+    </div>`;
+  }
+  container.innerHTML = html || '<div class="hint">數量設為 0,不會產生此角色設定。</div>';
+
+  // 綁定即時規格檢查
+  container.querySelectorAll('.hostname-input,.ip-input').forEach(el=>{
+    el.addEventListener('input', updateIpList);
+  });
+  container.querySelectorAll('.cpu-input,.ram-input,.osdisk-input,.datadisk-input,.osdisk-unit,.datadisk-unit').forEach(el=>{
+    el.addEventListener('input', ()=>{ checkSpecWarning(role, container); updateResourceSummary(); });
+    el.addEventListener('change', ()=>{ checkSpecWarning(role, container); updateResourceSummary(); });
+  });
+  checkSpecWarning(role, container);
+}
+
+function checkSpecWarning(role, container){
+  const meta = ROLE_LABELS[role];
+  const blocks = [...container.querySelectorAll('.ip-line')];
+  blocks.forEach((b)=>{
+    const cpu = parseFloat(b.querySelector('.cpu-input')?.value)||0;
+    const ram = parseFloat(b.querySelector('.ram-input')?.value)||0;
+    const datadiskUnit = b.querySelector('.datadisk-unit')?.value || 'GB';
+    const datadisk = toGB(b.querySelector('.datadisk-input')?.value, datadiskUnit);
+    const warnEl = b.querySelector('.spec-warn');
+    const issues = [];
+    if(cpu && cpu < meta.cpuMin) issues.push(`CPU 低於最低規格 (${cpu} < ${meta.cpuMin})`);
+    if(ram && ram < meta.ramMin) issues.push(`RAM 低於最低規格 (${ram}G < ${meta.ramMin}G)`);
+    if(datadisk && datadisk < meta.dataDiskMin) issues.push(`資料碟低於最低規格 (${datadisk}GB < ${meta.dataDiskMin}GB)`);
+    if(warnEl) warnEl.textContent = issues.length ? '⚠️ ' + issues.join('; ') : '';
+  });
+}
+
+function updateIpList(){
+  const roleNames = {idx:'Indexer', mgr:'Manager', dash:'Dashboard', lb:'LB', nids:'NIDS'};
+  const body = document.getElementById('ipListBody');
+  const dupWarn = document.getElementById('ipDupWarn');
+  if(!body) return;
+
+  const allEntries = [];
+  ['idx','mgr','dash','lb','nids'].forEach(role=>{
+    collectHosts(role).forEach(h=>{
+      allEntries.push({role: roleNames[role], name: h.name, ip: h.ip});
+    });
+  });
+  const vip = document.getElementById('vipAddr')?.value.trim();
+  if(vip) allEntries.push({role:'VIP', name:'(virtual ip)', ip: vip});
+
+  const ipCounts = {};
+  allEntries.forEach(e=>{ ipCounts[e.ip] = (ipCounts[e.ip]||0) + 1; });
+
+  let rows = '';
+  const dups = [];
+  allEntries.forEach(e=>{
+    const isDup = ipCounts[e.ip] > 1;
+    if(isDup && !dups.includes(e.ip)) dups.push(e.ip);
+    rows += `<tr style="border-bottom:1px solid var(--border); ${isDup?'color:var(--danger);':''}">
+      <td style="padding:6px 4px;">${e.role}</td>
+      <td style="padding:6px 4px;">${e.name}</td>
+      <td style="padding:6px 4px;">${e.ip}${isDup?' ⚠️':''}</td>
+    </tr>`;
+  });
+  body.innerHTML = rows || '<tr><td colspan="3" style="padding:8px 4px;color:var(--muted);">尚未填寫任何 IP</td></tr>';
+
+  if(dups.length){
+    dupWarn.style.display = 'block';
+    dupWarn.textContent = '⚠️ 以下 IP 重複被使用,請確認: ' + dups.join(', ');
+  } else {
+    dupWarn.style.display = 'none';
+  }
+}
+
+function formatSize(gb){
+  if(gb >= 1000) return (gb/1000).toFixed(gb % 1000 === 0 ? 0 : 2) + ' TB';
+  return gb.toFixed(gb % 1 === 0 ? 0 : 1) + ' GB';
+}
+
+function updateResourceSummary(){
+  const roleNames = {idx:'Indexer', mgr:'Manager', dash:'Dashboard', lb:'LB', nids:'NIDS'};
+  const body = document.getElementById('resourceSummaryBody');
+  if(!body) return;
+  let rows = '';
+  let totalCount=0, totalCpu=0, totalRam=0, totalOs=0, totalData=0;
+
+  ['idx','mgr','dash','lb','nids'].forEach(role=>{
+    const hosts = collectHosts(role);
+    let cpu=0, ram=0, os=0, data=0;
+    hosts.forEach(h=>{
+      cpu += parseFloat(h.cpu)||0;
+      ram += parseFloat(h.ram)||0;
+      os += h.osdisk||0;
+      data += h.datadisk||0;
+    });
+    totalCount += hosts.length;
+    totalCpu += cpu; totalRam += ram; totalOs += os; totalData += data;
+    rows += `<tr style="border-bottom:1px solid var(--border);">
+      <td style="padding:6px 4px;">${roleNames[role]}</td>
+      <td style="padding:6px 4px;">${hosts.length}</td>
+      <td style="padding:6px 4px;">${cpu}</td>
+      <td style="padding:6px 4px;">${ram}</td>
+      <td style="padding:6px 4px;">${formatSize(os)}</td>
+      <td style="padding:6px 4px;">${formatSize(data)}</td>
+    </tr>`;
+  });
+
+  body.innerHTML = rows;
+  document.getElementById('rsTotalCount').textContent = totalCount;
+  document.getElementById('rsTotalCpu').textContent = totalCpu;
+  document.getElementById('rsTotalRam').textContent = totalRam;
+  document.getElementById('rsTotalOsDisk').textContent = formatSize(totalOs);
+  document.getElementById('rsTotalDataDisk').textContent = formatSize(totalData);
+}
+
+function onPlatformChange(){
+  const platform = document.getElementById('hvPlatform').value;
+  const hint = document.getElementById('platformHint');
+  const hints = {
+    pve: '會在下載的 zip 內產生 00-set-static-ip.sh,於 PVE 宿主機執行,透過 qm guest exec 批量寫入各 VM 的 hostname 與 netplan 靜態 IP(需先填妥下方各主機的「PVE VM ID」欄位,且 VM 需已安裝 QEMU Guest Agent)。',
+    vmware: '會在 zip 內產生 00-vmware-customize-notes.md,列出用 govc 或 PowerCLI 建立 Guest Customization Spec 的指令範本,需你依實際 vCenter 環境填入帳密與 datastore/network 名稱後自行執行(此工具不儲存 vCenter 憑證)。VMware 沒有 PVE 那種數字 VM ID,是用 VM 名稱定位,故下方不會出現 VM ID 欄位。',
+    other: '假設 VM 已經有正確的 IP(DHCP 保留或已手動設定),不會產生額外的網路注入腳本,直接從 inventory.yml 開始執行部署。'
+  };
+  hint.textContent = hints[platform] || '';
+
+  document.querySelectorAll('.vmid-wrap').forEach(el=>{
+    el.style.display = (platform === 'pve') ? '' : 'none';
+  });
+}
+
+function onCountChange(role){
+  renderHostGroup(role);
+  updateCountBadge(role);
+  if(role==='lb') updateVipVisibility();
+  updateResourceSummary();
+  updateIpList();
+  onPlatformChange();
+}
+
+function updateCountBadge(role){
+  const count = parseInt(document.getElementById(role+'Count').value)||0;
+  const badge = document.getElementById(role+'CountBadge');
+  if(badge) badge.textContent = count + ' 台';
+}
+
+function updateVipVisibility(){
+  const lbCount = parseInt(document.getElementById('lbCount').value)||0;
+  const vipFields = document.getElementById('vipFields');
+  const vipSkipNote = document.getElementById('vipSkipNote');
+  const vipBadge = document.getElementById('vipBadge');
+  if(lbCount >= 2){
+    vipFields.style.display = '';
+    vipSkipNote.style.display = 'none';
+    vipBadge.textContent = 'LB ' + lbCount + ' 台,需要 VIP';
+  } else {
+    vipFields.style.display = 'none';
+    vipSkipNote.style.display = '';
+    vipBadge.textContent = 'LB 1 台,不需要 VIP';
+  }
+}
+
+['idx','mgr','dash','lb','nids'].forEach(r=>{ renderHostGroup(r); updateCountBadge(r); });
+updateVipVisibility();
+updateResourceSummary();
+updateIpList();
+onPlatformChange();
+document.getElementById('vipAddr')?.addEventListener('input', updateIpList);
+
+function toGB(value, unit){
+  const v = parseFloat(value)||0;
+  return unit === 'TB' ? v * 1000 : v;
+}
+
+function collectHosts(role){
+  const container = document.getElementById(role+'Hosts');
+  const blocks = [...container.querySelectorAll('.ip-line')];
+  const hosts = [];
+  blocks.forEach(b=>{
+    const name = b.querySelector('.hostname-input')?.value.trim() || '';
+    const ip = b.querySelector('.ip-input')?.value.trim() || '';
+    const vmid = b.querySelector('.vmid-input')?.value.trim() || '';
+    const cpu = b.querySelector('.cpu-input')?.value.trim() || '';
+    const ram = b.querySelector('.ram-input')?.value.trim() || '';
+    const osdiskRaw = b.querySelector('.osdisk-input')?.value.trim() || '';
+    const osdiskUnit = b.querySelector('.osdisk-unit')?.value || 'GB';
+    const datadiskRaw = b.querySelector('.datadisk-input')?.value.trim() || '';
+    const datadiskUnit = b.querySelector('.datadisk-unit')?.value || 'GB';
+    const osdisk = toGB(osdiskRaw, osdiskUnit);
+    const datadisk = toGB(datadiskRaw, datadiskUnit);
+    if(name && ip) hosts.push({name, ip, vmid, cpu, ram, osdisk, datadisk, osdiskRaw, osdiskUnit, datadiskRaw, datadiskUnit});
+  });
+  return hosts;
+}
+
+function randomHex(len){
+  const bytes = new Uint8Array(len/2);
+  crypto.getRandomValues(bytes);
+  return [...bytes].map(b=>b.toString(16).padStart(2,'0')).join('');
+}
+function randomPassword(len){
+  const chars='ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz23456789!@#%^*';
+  const arr = new Uint32Array(len);
+  crypto.getRandomValues(arr);
+  return [...arr].map(n=>chars[n%chars.length]).join('');
+}
+
+function buildInventory(data){
+  const sec = (title, hosts) => {
+    if(!hosts.length) return '';
+    let out = `[${title}]\n`;
+    hosts.forEach(h=>{
+      let line = `${h.name} ansible_host=${h.ip}`;
+      if(h.cpu) line += ` spec_cpu=${h.cpu}`;
+      if(h.ram) line += ` spec_ram_gb=${h.ram}`;
+      if(h.osdisk) line += ` spec_os_disk_gb=${h.osdisk}`;
+      if(h.datadisk) line += ` spec_data_disk_gb=${h.datadisk}`;
+      out += line + '\n';
+    });
+    return out + '\n';
+  };
+  let inv = '';
+  inv += sec('indexer', data.idx);
+  inv += sec('manager_master', data.mgr.slice(0,1));
+  inv += sec('manager_worker', data.mgr.slice(1));
+  inv += sec('dashboard', data.dash);
+  inv += sec('lb', data.lb);
+  inv += sec('nids', data.nids);
+  inv += `[wazuh_cluster:children]\nindexer\nmanager_master\nmanager_worker\ndashboard\nlb\nnids\n\n`;
+  inv += `[wazuh_cluster:vars]\nansible_user=${data.sshUser}\nansible_ssh_common_args='-o StrictHostKeyChecking=no'\n`;
+  if(data.sshPass) inv += `ansible_ssh_pass=${data.sshPass}\nansible_become_pass=${data.sshPass}\n`;
+  inv += `ansible_become=true\n`;
+  return inv;
+}
+
+function buildGroupVars(data){
+  const idxIpList = data.idx.map(h=>`      - "${h.ip}"`).join('\n');
+  const idxNameList = data.idx.map(h=>`      - "${h.name}"`).join('\n');
+  const idxDnList = data.idx.map(h=>`      - "CN=${h.name},OU=VistaAI,O=VistaAI,L=Taipei,C=TW"`).join('\n');
+  const mgrMasterIp = data.mgr[0] ? data.mgr[0].ip : '';
+
+  return `# ============================================
+# Vista AI 叢集變數 - 客戶: ${data.customerName}
+# 產生時間: ${new Date().toISOString()}
+# ============================================
+
+customer_name: "${data.customerName}"
+
+# --- VIP / 網段 ---
+vip_address: "${data.vip}"
+vip_cidr: "${data.vipCidr}"
+dns_server: "${data.dnsServer}"
+gateway_address: "${data.gateway}"
+
+# --- 叢集認證 ---
+cluster_key: "${data.clusterKey}"
+
+# --- 帳密設定 (務必於部署後立即透過 wazuh-passwords-tool 更新真實密碼) ---
+opensearch_admin_user: "admin"
+opensearch_admin_password: "${data.opensearchPass}"
+
+# --- Manager Master IP (供 worker 節點與 LB 設定引用) ---
+manager_master_ip: "${mgrMasterIp}"
+
+# --- Indexer 節點清單 (供 opensearch.yml / filebeat.yml 樣板引用) ---
+indexer_ips:
+${idxIpList || '      []'}
+
+indexer_names:
+${idxNameList || '      []'}
+
+indexer_node_dns:
+${idxDnList || '      []'}
+
+# --- Wazuh 版本 ---
+wazuh_version: "4.8"
+filebeat_version: "7.10.2"
+
+# --- 憑證 DN 客製 (品牌隱蔽用,對外顯示 Vista AI 而非 Wazuh) ---
+cert_org: "VistaAI"
+cert_ou: "VistaAI"
+cert_location: "Taipei"
+cert_country: "TW"
+`;
+}
+
+function buildSitePlaybook(){
+  return `---
+# Vista AI 叢集部署 - 主 Playbook
+# 使用方式: ansible-playbook -i inventory.yml site.yml --ask-vault-pass
+# (若 group_vars/all.yml 未加密則可省略 --ask-vault-pass)
+
+- name: 前置檢查
+  hosts: wazuh_cluster
+  gather_facts: true
+  tasks:
+    - name: 確認可連線與 sudo 權限
+      ansible.builtin.ping:
+
+    - name: 讀取實際硬體規格
+      ansible.builtin.set_fact:
+        actual_cpu: "{{ ansible_processor_vcpus | default(ansible_processor_count) }}"
+        actual_ram_gb: "{{ (ansible_memtotal_mb / 1024) | round(1) }}"
+
+    - name: 比對宣告規格與實際硬體 (CPU)
+      ansible.builtin.debug:
+        msg: "⚠️ {{ inventory_hostname }} 宣告 CPU={{ spec_cpu }} 核,實際偵測到 {{ actual_cpu }} 核,請確認 VM 資源是否配置正確"
+      when: spec_cpu is defined and (actual_cpu | int) < (spec_cpu | int)
+
+    - name: 比對宣告規格與實際硬體 (RAM)
+      ansible.builtin.debug:
+        msg: "⚠️ {{ inventory_hostname }} 宣告 RAM={{ spec_ram_gb }}G,實際偵測到約 {{ actual_ram_gb }}G,請確認 VM 資源是否配置正確"
+      when: spec_ram_gb is defined and (actual_ram_gb | float) < (spec_ram_gb | float) - 1
+
+- name: 部署 Indexer 儲存叢集
+  hosts: indexer
+  become: true
+  roles:
+    - indexer
+
+- name: 初始化 Indexer 安全設定 (僅第一台執行)
+  hosts: indexer[0]
+  become: true
+  roles:
+    - indexer_security_init
+
+- name: 部署 Wazuh Manager 叢集
+  hosts: manager_master:manager_worker
+  become: true
+  roles:
+    - manager
+
+- name: 部署 Dashboard
+  hosts: dashboard
+  become: true
+  roles:
+    - dashboard
+
+- name: 部署 LB (HAProxy + Keepalived)
+  hosts: lb
+  become: true
+  roles:
+    - loadbalancer
+
+- name: 部署 NIDS (Suricata + Agent)
+  hosts: nids
+  become: true
+  roles:
+    - nids
+
+- name: 完成訊息
+  hosts: localhost
+  connection: local
+  tasks:
+    - name: 顯示完成訊息
+      ansible.builtin.debug:
+        msg: "🎉 Vista AI 叢集部署完成,請執行 ansible-playbook -i inventory.yml verify.yml 進行驗收"
+`;
+}
+
+function buildIndexerRole(){
+  return `---
+- name: 設定 vm.max_map_count
+  ansible.posix.sysctl:
+    name: vm.max_map_count
+    value: "262144"
+    state: present
+    reload: true
+
+- name: 安裝前置套件
+  ansible.builtin.apt:
+    name: [curl, apt-transport-https, gnupg]
+    state: present
+    update_cache: true
+
+- name: 匯入 Wazuh GPG key
+  ansible.builtin.shell: |
+    curl -s https://packages.wazuh.com/key/GPG-KEY-WAZUH | gpg --dearmor -o /usr/share/keyrings/wazuh.gpg --yes
+  args:
+    creates: /usr/share/keyrings/wazuh.gpg
+
+- name: 加入 Wazuh apt repo
+  ansible.builtin.copy:
+    dest: /etc/apt/sources.list.d/wazuh.list
+    content: "deb [signed-by=/usr/share/keyrings/wazuh.gpg] https://packages.wazuh.com/4.x/apt/ stable main\\n"
+
+- name: 安裝 wazuh-indexer
+  ansible.builtin.apt:
+    name: wazuh-indexer
+    state: present
+    update_cache: true
+
+- name: 建立憑證目錄
+  ansible.builtin.file:
+    path: /etc/wazuh-indexer/certs
+    state: directory
+    owner: wazuh-indexer
+    group: wazuh-indexer
+    mode: "0500"
+
+- name: 上傳憑證 (需先於 certs/ 目錄準備好每台節點的憑證檔)
+  ansible.builtin.copy:
+    src: "certs/{{ item }}"
+    dest: "/etc/wazuh-indexer/certs/{{ item }}"
+    owner: wazuh-indexer
+    group: wazuh-indexer
+    mode: "0400"
+  loop:
+    - root-ca.pem
+    - "{{ inventory_hostname }}.pem"
+    - "{{ inventory_hostname }}-key.pem"
+    - admin.pem
+    - admin-key.pem
+
+- name: 寫入 opensearch.yml
+  ansible.builtin.template:
+    src: opensearch.yml.j2
+    dest: /etc/wazuh-indexer/opensearch.yml
+    owner: wazuh-indexer
+    group: wazuh-indexer
+    mode: "0640"
+  notify: restart wazuh-indexer
+
+- name: 啟動並設定開機自啟
+  ansible.builtin.systemd:
+    name: wazuh-indexer
+    enabled: true
+    state: started
+    daemon_reload: true
+`;
+}
+
+function buildIndexerSecurityInitRole(){
+  return `---
+- name: 執行 securityadmin.sh 初始化安全索引
+  ansible.builtin.shell: |
+    JAVA_HOME="/usr/share/wazuh-indexer/jdk" \\
+    /usr/share/wazuh-indexer/plugins/opensearch-security/tools/securityadmin.sh \\
+      -cd /etc/wazuh-indexer/opensearch-security \\
+      -cacert /etc/wazuh-indexer/certs/root-ca.pem \\
+      -cert /etc/wazuh-indexer/certs/admin.pem \\
+      -key /etc/wazuh-indexer/certs/admin-key.pem \\
+      -h {{ ansible_host }} -p 9200 -icl -nhnv
+  register: sec_init
+  changed_when: "'Done with success' in sec_init.stdout"
+
+# 建議:安全索引初始化完成後,立即改用官方 wazuh-passwords-tool.sh
+# 產生高強度密碼並更新 internal_users.yml,不要沿用預設 admin/admin
+- name: 提醒更新真實密碼
+  ansible.builtin.debug:
+    msg: "⚠️ 請執行 wazuh-passwords-tool.sh 更新 admin 等內建帳號密碼,不要保留預設值"
+`;
+}
+
+function buildManagerRole(){
+  return `---
+- name: 安裝前置套件
+  ansible.builtin.apt:
+    name: [curl, apt-transport-https, gnupg]
+    state: present
+    update_cache: true
+
+- name: 匯入 Wazuh GPG key
+  ansible.builtin.shell: |
+    curl -s https://packages.wazuh.com/key/GPG-KEY-WAZUH | gpg --dearmor -o /usr/share/keyrings/wazuh.gpg --yes
+  args:
+    creates: /usr/share/keyrings/wazuh.gpg
+
+- name: 加入 Wazuh apt repo
+  ansible.builtin.copy:
+    dest: /etc/apt/sources.list.d/wazuh.list
+    content: "deb [signed-by=/usr/share/keyrings/wazuh.gpg] https://packages.wazuh.com/4.x/apt/ stable main\\n"
+
+- name: 安裝 wazuh-manager
+  ansible.builtin.apt:
+    name: wazuh-manager
+    state: present
+    update_cache: true
+
+- name: 寫入 cluster 設定區塊
+  ansible.builtin.blockinfile:
+    path: /var/ossec/etc/ossec.conf
+    marker: "<!-- {mark} ANSIBLE MANAGED CLUSTER BLOCK -->"
+    insertbefore: "</ossec_config>"
+    block: |
+      <cluster>
+        <name>vista-ai-cluster</name>
+        <node_name>{{ inventory_hostname }}</node_name>
+        <node_type>{{ 'master' if inventory_hostname in groups['manager_master'] else 'worker' }}</node_type>
+        <key>{{ cluster_key }}</key>
+        <interval>10s</interval>
+        <port>1516</port>
+        <bind_addr>0.0.0.0</bind_addr>
+        <nodes><node>{{ manager_master_ip }}</node></nodes>
+        <hidden>no</hidden>
+        <disabled>no</disabled>
+      </cluster>
+
+- name: 下載 filebeat 7.10.2 (Wazuh 官方相容版本)
+  ansible.builtin.get_url:
+    url: https://artifacts.elastic.co/downloads/beats/filebeat/filebeat-7.10.2-amd64.deb
+    dest: /tmp/filebeat-7.10.2-amd64.deb
+
+- name: 安裝 filebeat
+  ansible.builtin.apt:
+    deb: /tmp/filebeat-7.10.2-amd64.deb
+
+- name: 建立 filebeat 憑證目錄
+  ansible.builtin.file:
+    path: /etc/filebeat/certs
+    state: directory
+    mode: "0500"
+
+- name: 上傳憑證
+  ansible.builtin.copy:
+    src: "certs/{{ item }}"
+    dest: "/etc/filebeat/certs/{{ item }}"
+    mode: "0400"
+  loop:
+    - root-ca.pem
+    - "{{ inventory_hostname }}.pem"
+    - "{{ inventory_hostname }}-key.pem"
+
+- name: 下載 wazuh filebeat module
+  ansible.builtin.shell: |
+    mkdir -p /usr/share/filebeat/module/
+    curl -s https://packages.wazuh.com/4.x/filebeat/wazuh-filebeat-0.1.tar.gz | tar -xvz -C /usr/share/filebeat/module/
+  args:
+    creates: /usr/share/filebeat/module/wazuh
+
+- name: 下載 wazuh-template.json
+  ansible.builtin.get_url:
+    url: https://raw.githubusercontent.com/wazuh/wazuh/v4.8.0/extensions/filebeat/7.x/wazuh-template.json
+    dest: /etc/filebeat/wazuh-template.json
+    mode: "0644"
+
+- name: 寫入 filebeat.yml
+  ansible.builtin.template:
+    src: filebeat.yml.j2
+    dest: /etc/filebeat/filebeat.yml
+  notify: restart filebeat
+
+- name: 啟動服務
+  ansible.builtin.systemd:
+    name: "{{ item }}"
+    enabled: true
+    state: started
+    daemon_reload: true
+  loop:
+    - wazuh-manager
+    - filebeat
+`;
+}
+
+function buildDashboardRole(){
+  return `---
+- name: 安裝前置套件與 GPG key
+  ansible.builtin.apt:
+    name: [curl, apt-transport-https, gnupg]
+    state: present
+    update_cache: true
+
+- name: 匯入 Wazuh GPG key
+  ansible.builtin.shell: |
+    curl -s https://packages.wazuh.com/key/GPG-KEY-WAZUH | gpg --dearmor -o /usr/share/keyrings/wazuh.gpg --yes
+  args:
+    creates: /usr/share/keyrings/wazuh.gpg
+
+- name: 加入 Wazuh apt repo
+  ansible.builtin.copy:
+    dest: /etc/apt/sources.list.d/wazuh.list
+    content: "deb [signed-by=/usr/share/keyrings/wazuh.gpg] https://packages.wazuh.com/4.x/apt/ stable main\\n"
+
+- name: 安裝 wazuh-dashboard
+  ansible.builtin.apt:
+    name: wazuh-dashboard
+    state: present
+    update_cache: true
+
+- name: 建立憑證目錄
+  ansible.builtin.file:
+    path: /etc/wazuh-dashboard/certs
+    state: directory
+    mode: "0500"
+
+- name: 上傳憑證
+  ansible.builtin.copy:
+    src: "certs/{{ item }}"
+    dest: "/etc/wazuh-dashboard/certs/{{ item }}"
+    mode: "0400"
+  loop:
+    - root-ca.pem
+    - "{{ inventory_hostname }}.pem"
+    - "{{ inventory_hostname }}-key.pem"
+
+- name: 寫入 opensearch_dashboards.yml
+  ansible.builtin.template:
+    src: opensearch_dashboards.yml.j2
+    dest: /etc/wazuh-dashboard/opensearch_dashboards.yml
+  notify: restart wazuh-dashboard
+
+# 品牌隱蔽:將 Dashboard 標題/Logo 換成 Vista AI (opensearch_dashboards.yml 內
+# opensearchDashboards.branding 區塊,或另外客製前端資源,請依實際版本調整)
+
+- name: 啟動服務
+  ansible.builtin.systemd:
+    name: wazuh-dashboard
+    enabled: true
+    state: started
+    daemon_reload: true
+`;
+}
+
+function buildLbRole(){
+  return `---
+- name: 安裝 haproxy
+  ansible.builtin.apt:
+    name: haproxy
+    state: present
+    update_cache: true
+
+- name: 安裝 keepalived (僅當 LB 數量 >= 2 台,需要 VIP 漂移時)
+  ansible.builtin.apt:
+    name: keepalived
+    state: present
+  when: groups['lb'] | length > 1
+
+- name: 取得預設對外網卡名稱
+  ansible.builtin.shell: ip -4 route show default | awk '{print $5}' | head -n1
+  register: default_iface
+  changed_when: false
+  when: groups['lb'] | length > 1
+
+- name: 寫入 keepalived.conf (僅當 LB 數量 >= 2 台)
+  ansible.builtin.template:
+    src: keepalived.conf.j2
+    dest: /etc/keepalived/keepalived.conf
+  vars:
+    iface: "{{ default_iface.stdout }}"
+    ha_role: "{{ 'MASTER' if inventory_hostname == groups['lb'][0] else 'BACKUP' }}"
+    ha_priority: "{{ 101 if inventory_hostname == groups['lb'][0] else 100 }}"
+  notify: restart keepalived
+  when: groups['lb'] | length > 1
+
+- name: 寫入 haproxy.cfg
+  ansible.builtin.template:
+    src: haproxy.cfg.j2
+    dest: /etc/haproxy/haproxy.cfg
+  notify: restart haproxy
+
+- name: 啟用 net.ipv4.ip_nonlocal_bind (僅當 LB 數量 >= 2 台)
+  ansible.posix.sysctl:
+    name: net.ipv4.ip_nonlocal_bind
+    value: "1"
+    state: present
+    reload: true
+  when: groups['lb'] | length > 1
+
+- name: 啟動 haproxy
+  ansible.builtin.systemd:
+    name: haproxy
+    enabled: true
+    state: started
+    daemon_reload: true
+
+- name: 啟動 keepalived (僅當 LB 數量 >= 2 台)
+  ansible.builtin.systemd:
+    name: keepalived
+    enabled: true
+    state: started
+    daemon_reload: true
+  when: groups['lb'] | length > 1
+
+- name: 單台 LB 提醒(無 VIP 高可用)
+  ansible.builtin.debug:
+    msg: "ℹ️ 目前只有 1 台 LB,未啟用 VIP/keepalived,此節點為單點,無自動容錯"
+  when: groups['lb'] | length <= 1
+`;
+}
+
+function buildNidsRole(){
+  return `---
+- name: 安裝 suricata 與相依套件
+  ansible.builtin.apt:
+    name: [suricata, jq, curl, gnupg]
+    state: present
+    update_cache: true
+
+- name: 更新 suricata rules
+  ansible.builtin.command: suricata-update
+  changed_when: true
+
+- name: 匯入 Wazuh GPG key 並安裝 agent
+  ansible.builtin.shell: |
+    curl -s https://packages.wazuh.com/key/GPG-KEY-WAZUH | gpg --dearmor -o /usr/share/keyrings/wazuh.gpg --yes
+    echo "deb [signed-by=/usr/share/keyrings/wazuh.gpg] https://packages.wazuh.com/4.x/apt/ stable main" > /etc/apt/sources.list.d/wazuh.list
+    apt-get update -y && apt-get install -y wazuh-agent
+
+- name: 設定 agent 連線至 VIP
+  ansible.builtin.replace:
+    path: /var/ossec/etc/ossec.conf
+    regexp: "<address>.*</address>"
+    replace: "<address>{{ vip_address }}</address>"
+
+- name: 加入 suricata log 來源
+  ansible.builtin.blockinfile:
+    path: /var/ossec/etc/ossec.conf
+    insertbefore: "</ossec_config>"
+    block: |
+      <localfile>
+        <log_format>json</log_format>
+        <location>/var/log/suricata/eve.json</location>
+      </localfile>
+
+- name: 啟動服務
+  ansible.builtin.systemd:
+    name: "{{ item }}"
+    enabled: true
+    state: started
+    daemon_reload: true
+  loop:
+    - suricata
+    - wazuh-agent
+`;
+}
+
+function buildTemplates(){
+  return {
+    'roles/indexer/templates/opensearch.yml.j2': `cluster.name: "vista-ai-cluster"
+node.name: "{{ inventory_hostname }}"
+node.roles: ["master", "data"]
+path.data: /var/lib/opensearch
+path.logs: /var/log/wazuh-indexer
+network.host: {{ ansible_host }}
+http.port: 9200
+discovery.seed_hosts:
+{% for ip in indexer_ips %}
+  - "{{ ip }}"
+{% endfor %}
+cluster.initial_master_nodes:
+{% for name in indexer_names %}
+  - "{{ name }}"
+{% endfor %}
+
+plugins.security.ssl.transport.pemcert_filepath: certs/{{ inventory_hostname }}.pem
+plugins.security.ssl.transport.pemkey_filepath: certs/{{ inventory_hostname }}-key.pem
+plugins.security.ssl.transport.pemtrustedcas_filepath: certs/root-ca.pem
+plugins.security.ssl.transport.enforce_hostname_verification: false
+
+plugins.security.ssl.http.enabled: true
+plugins.security.ssl.http.pemcert_filepath: certs/{{ inventory_hostname }}.pem
+plugins.security.ssl.http.pemkey_filepath: certs/{{ inventory_hostname }}-key.pem
+plugins.security.ssl.http.pemtrustedcas_filepath: certs/root-ca.pem
+
+plugins.security.nodes_dn:
+{% for dn in indexer_node_dns %}
+  - "{{ dn }}"
+{% endfor %}
+
+plugins.security.authcz.admin_dn:
+  - "CN=admin,OU={{ cert_ou }},O={{ cert_org }},L={{ cert_location }},C={{ cert_country }}"
+`,
+    'roles/manager/templates/filebeat.yml.j2': `output.elasticsearch:
+  hosts:
+{% for ip in indexer_ips %}
+    - "https://{{ ip }}:9200"
+{% endfor %}
+  protocol: "https"
+  username: "{{ opensearch_admin_user }}"
+  password: "{{ opensearch_admin_password }}"
+  ssl.certificate_authorities: ["/etc/filebeat/certs/root-ca.pem"]
+  ssl.certificate: "/etc/filebeat/certs/{{ inventory_hostname }}.pem"
+  ssl.key: "/etc/filebeat/certs/{{ inventory_hostname }}-key.pem"
+  ssl.verification_mode: "full"
+
+setup.template.json.enabled: true
+setup.template.json.path: "/etc/filebeat/wazuh-template.json"
+setup.template.json.name: "wazuh"
+
+filebeat.modules:
+  - module: wazuh
+    alerts: { enabled: true }
+    archives: { enabled: false }
+`,
+    'roles/dashboard/templates/opensearch_dashboards.yml.j2': `server.port: 443
+server.host: "0.0.0.0"
+opensearch.hosts:
+{% for ip in indexer_ips %}
+  - "https://{{ ip }}:9200"
+{% endfor %}
+opensearch.username: "{{ opensearch_admin_user }}"
+opensearch.password: "{{ opensearch_admin_password }}"
+opensearch.ssl.certificateAuthorities: ["/etc/wazuh-dashboard/certs/root-ca.pem"]
+opensearch.ssl.verificationMode: full
+
+server.ssl.enabled: true
+server.ssl.certificate: "/etc/wazuh-dashboard/certs/{{ inventory_hostname }}.pem"
+server.ssl.key: "/etc/wazuh-dashboard/certs/{{ inventory_hostname }}-key.pem"
+
+# 品牌客製 (依實際 Wazuh/OpenSearch Dashboards 版本調整參數名稱)
+# opensearchDashboards.branding.applicationTitle: "Vista AI"
+`,
+    'roles/loadbalancer/templates/keepalived.conf.j2': `vrrp_script check_haproxy {
+    script "killall -0 haproxy"
+    interval 2
+    weight 2
+}
+vrrp_instance VI_1 {
+    state {{ ha_role }}
+    interface {{ iface }}
+    virtual_router_id 51
+    priority {{ ha_priority }}
+    advert_int 1
+    authentication {
+        auth_type PASS
+        auth_pass {{ cluster_key[:8] }}
+    }
+    virtual_ipaddress {
+        {{ vip_address }}/{{ vip_cidr }}
+    }
+    track_script { check_haproxy }
+}
+`,
+    'roles/loadbalancer/templates/haproxy.cfg.j2': `global
+    log /dev/log local0
+    chroot /var/lib/haproxy
+    user haproxy
+    group haproxy
+    daemon
+
+defaults
+    log global
+    mode tcp
+    option tcplog
+    timeout connect 5000ms
+    timeout client 50000ms
+    timeout server 50000ms
+
+frontend wazuh_agent_frontend
+    bind *:1514
+    mode tcp
+    default_backend wazuh_agent_backend
+backend wazuh_agent_backend
+    mode tcp
+    balance roundrobin
+{% for host in groups['manager_master'] + groups['manager_worker'] %}
+    server {{ host }} {{ hostvars[host].ansible_host }}:1514 check
+{% endfor %}
+
+frontend wazuh_auth_frontend
+    bind *:1515
+    mode tcp
+    default_backend wazuh_auth_backend
+backend wazuh_auth_backend
+    mode tcp
+    server {{ groups['manager_master'][0] }} {{ hostvars[groups['manager_master'][0]].ansible_host }}:1515 check
+
+frontend wazuh_api_frontend
+    bind *:55000
+    mode tcp
+    default_backend wazuh_api_backend
+backend wazuh_api_backend
+    mode tcp
+    server {{ groups['manager_master'][0] }} {{ hostvars[groups['manager_master'][0]].ansible_host }}:55000 check
+
+frontend syslog_frontend
+    bind *:514
+    mode tcp
+    default_backend syslog_backend
+backend syslog_backend
+    mode tcp
+    balance roundrobin
+{% for host in groups['manager_master'] + groups['manager_worker'] %}
+    server {{ host }} {{ hostvars[host].ansible_host }}:514 check
+{% endfor %}
+`
+  };
+}
+
+function buildHandlers(role){
+  const map = {
+    indexer: 'wazuh-indexer',
+    manager: 'wazuh-manager',
+    dashboard: 'wazuh-dashboard'
+  };
+  if(role==='manager'){
+    return `---
+- name: restart wazuh-manager
+  ansible.builtin.systemd:
+    name: wazuh-manager
+    state: restarted
+
+- name: restart filebeat
+  ansible.builtin.systemd:
+    name: filebeat
+    state: restarted
+`;
+  }
+  if(role==='loadbalancer'){
+    return `---
+- name: restart haproxy
+  ansible.builtin.systemd:
+    name: haproxy
+    state: restarted
+
+- name: restart keepalived
+  ansible.builtin.systemd:
+    name: keepalived
+    state: restarted
+`;
+  }
+  const svc = map[role];
+  if(!svc) return '---\n';
+  return `---
+- name: restart ${svc}
+  ansible.builtin.systemd:
+    name: ${svc}
+    state: restarted
+`;
+}
+
+function buildVerifyPlaybook(){
+  return `---
+# Vista AI 叢集驗收腳本
+# 使用方式: ansible-playbook -i inventory.yml verify.yml
+
+- name: 檢查 Indexer 叢集健康狀態
+  hosts: indexer[0]
+  become: true
+  tasks:
+    - name: 查詢 cluster health
+      ansible.builtin.uri:
+        url: "https://{{ ansible_host }}:9200/_cluster/health"
+        method: GET
+        user: "{{ opensearch_admin_user }}"
+        password: "{{ opensearch_admin_password }}"
+        validate_certs: false
+        force_basic_auth: true
+      register: idx_health
+    - name: 顯示結果
+      ansible.builtin.debug:
+        msg: "Indexer 叢集狀態: {{ idx_health.json.status }} (節點數: {{ idx_health.json.number_of_nodes }})"
+    - name: 若非 green/yellow 則標記失敗
+      ansible.builtin.fail:
+        msg: "Indexer 叢集狀態異常: {{ idx_health.json.status }}"
+      when: idx_health.json.status == "red"
+
+- name: 檢查 Manager 服務狀態
+  hosts: manager_master:manager_worker
+  become: true
+  tasks:
+    - name: 確認 wazuh-manager 執行中
+      ansible.builtin.systemd:
+        name: wazuh-manager
+      register: mgr_status
+    - name: 顯示結果
+      ansible.builtin.debug:
+        msg: "{{ inventory_hostname }} wazuh-manager: {{ mgr_status.status.ActiveState }}"
+    - name: 確認 filebeat 執行中
+      ansible.builtin.systemd:
+        name: filebeat
+      register: fb_status
+    - name: 顯示結果
+      ansible.builtin.debug:
+        msg: "{{ inventory_hostname }} filebeat: {{ fb_status.status.ActiveState }}"
+
+- name: 檢查 Dashboard 可連通性
+  hosts: dashboard
+  become: true
+  tasks:
+    - name: 確認 443 port 有服務回應
+      ansible.builtin.uri:
+        url: "https://{{ ansible_host }}:443"
+        method: GET
+        validate_certs: false
+        status_code: [200, 302, 401]
+      register: dash_check
+    - name: 顯示結果
+      ansible.builtin.debug:
+        msg: "Dashboard {{ inventory_hostname }} 回應碼: {{ dash_check.status }}"
+
+- name: 檢查 LB / VIP 狀態
+  hosts: lb
+  become: true
+  tasks:
+    - name: 確認 haproxy 執行中
+      ansible.builtin.systemd:
+        name: haproxy
+      register: ha_status
+    - name: 確認 keepalived 執行中 (僅當 LB >= 2 台)
+      ansible.builtin.systemd:
+        name: keepalived
+      register: kp_status
+      when: groups['lb'] | length > 1
+    - name: 檢查本機是否持有 VIP (僅當 LB >= 2 台)
+      ansible.builtin.shell: "ip addr show | grep -q {{ vip_address }} && echo yes || echo no"
+      register: vip_holder
+      changed_when: false
+      when: groups['lb'] | length > 1 and vip_address | length > 0
+    - name: 顯示結果 (多台 LB)
+      ansible.builtin.debug:
+        msg: "{{ inventory_hostname }} haproxy={{ ha_status.status.ActiveState }} keepalived={{ kp_status.status.ActiveState }} 持有VIP={{ vip_holder.stdout | default('N/A') }}"
+      when: groups['lb'] | length > 1
+    - name: 顯示結果 (單台 LB,無 VIP)
+      ansible.builtin.debug:
+        msg: "{{ inventory_hostname }} haproxy={{ ha_status.status.ActiveState }} (單台 LB,未啟用 VIP)"
+      when: groups['lb'] | length <= 1
+
+- name: 彙整驗收結果
+  hosts: localhost
+  connection: local
+  tasks:
+    - name: 完成
+      ansible.builtin.debug:
+        msg: "✅ 驗收腳本執行完畢,請檢視以上各節點狀態輸出。務必至少有一台 LB 顯示「持有VIP=yes」。"
+`;
+}
+
+function buildPveStage0Script(data){
+  const allHosts = [
+    ...data.idx, ...data.mgr, ...data.dash, ...data.lb, ...data.nids
+  ].filter(h=>h.vmid);
+
+  if(!allHosts.length){
+    return `#!/usr/bin/env bash
+echo "⚠️ 尚未填寫任何主機的 PVE VM ID,此腳本沒有任何動作可執行。"
+echo "請回到網頁工具,在各主機列補上「PVE VM ID」欄位後重新產生。"
+`;
+  }
+
+  const entries = allHosts.map(h=>`  [${h.vmid}]="${h.ip}:${h.name}"`).join('\n');
+
+  return `#!/usr/bin/env bash
+# Vista AI - 宿主機批量塞入 Static IP / Hostname (Proxmox VE / KVM)
+# 於 PVE 宿主機 Shell 執行 (需具備 qm 指令與對各 VM 的存取權限)
+# 前提: 各 VM 需已安裝 QEMU Guest Agent 並開機完成
+
+set -euo pipefail
+
+GATEWAY="${data.gateway || '請填入 Gateway'}"
+DNS="${data.dnsServer || '請填入 DNS'}"
+CIDR="${data.vipCidr || '24'}"
+
+declare -A VM_IPS=(
+${entries}
+)
+
+echo "=== 開始透過宿主機對 \${#VM_IPS[@]} 台 VM 設定 Static IP 與 Hostname ==="
+
+for vmid in "\${!VM_IPS[@]}"; do
+  info="\${VM_IPS[\$vmid]}"
+  ip="\${info%%:*}"
+  hostname="\${info##*:}"
+
+  echo "正在處理 VM \$vmid (\$hostname -> \$ip)..."
+
+  qm guest exec "\$vmid" -- bash -c "hostnamectl set-hostname \$hostname"
+
+  qm guest exec "\$vmid" -- bash -c "
+    IFACE=\\\$(ip -4 route show default 2>/dev/null | awk '{print \\\$5}' | head -n 1)
+    [ -z \\\"\\\$IFACE\\\" ] && IFACE=\\\"ens18\\\"
+
+    cat <<EOF> /etc/netplan/50-cloud-init.yaml
+network:
+  version: 2
+  ethernets:
+    \\\$IFACE:
+      dhcp4: no
+      addresses:
+        - $ip/\$CIDR
+      routes:
+        - to: default
+          via: \$GATEWAY
+      nameservers:
+        addresses:
+          - \$DNS
+EOF
+    chmod 600 /etc/netplan/50-cloud-init.yaml
+    netplan apply
+  "
+done
+
+echo "🎉 \${#VM_IPS[@]} 台 VM 靜態 IP 注入完成!請等待數秒讓網路生效,再執行 deploy.sh check 測試 SSH 連線。"
+`;
+}
+
+function buildVmwareNotes(data){
+  const allHosts = [
+    ...data.idx, ...data.mgr, ...data.dash, ...data.lb, ...data.nids
+  ];
+  let table = `| 主機名稱 | IP | Gateway | DNS |\n| --- | --- | --- | --- |\n`;
+  allHosts.forEach(h=>{
+    table += `| ${h.name} | ${h.ip} | ${data.gateway||'-'} | ${data.dnsServer||'-'} |\n`;
+  });
+
+  return `# VMware vSphere 靜態 IP 注入操作指引 - ${data.customerName}
+
+此工具不儲存 vCenter 帳密,無法直接自動執行。以下提供兩種常見做法的指令範本,請依實際環境調整後自行執行。
+
+## 方式一: govc (CLI,適合已有 govc 環境)
+
+\`\`\`bash
+export GOVC_URL=https://<vcenter-fqdn>/sdk
+export GOVC_USERNAME=<user>
+export GOVC_PASSWORD=<password>
+export GOVC_INSECURE=1
+
+# 對每一台 VM 建立/套用 customization spec (詳細字段請參考 govc vm.customize -help)
+\`\`\`
+
+## 方式二: PowerCLI (Windows / PowerShell)
+
+\`\`\`powershell
+Connect-VIServer -Server <vcenter-fqdn>
+
+$spec = New-OSCustomizationSpec -Name "vista-ai-linux" -OSType Linux -Domain "local" -DnsServer "${data.dnsServer||'<DNS>'}"
+
+Get-VM -Name "<VM名稱>" | Set-OSCustomizationSpec -OSCustomizationSpec $spec |
+  Set-OSCustomizationNicMapping -IpMode UseStaticIP -IpAddress "<IP>" -SubnetMask 255.255.255.0 -DefaultGateway "${data.gateway||'<Gateway>'}"
+Get-VM -Name "<VM名稱>" | Start-VM
+\`\`\`
+
+## 本次客戶主機對照表
+
+${table}
+
+## 建議
+
+- 若 VM 樣板已安裝 cloud-init,也可改用 vSphere Guest Customization + cloud-init 交接的方式(vCenter 透過 VMware Tools 把 IP/DNS/Gateway 交給 cloud-init 執行),不同 OS 版本行為可能有差異(例如 RHEL 8/9 之間),請參考 Broadcom/VMware 官方文件。
+- 套用完成後,建議先 ping/ssh 驗證每台 VM 的新 IP 可連通,再執行 deploy.sh check。
+`;
+}
+
+function buildDeploySh(customerName, platform){
+  const networkCase = platform==='pve' ? `
+  network)
+    echo "=== [客戶: ${customerName}] 執行宿主機批量塞 IP (Proxmox VE) ==="
+    echo "請確認此腳本是在 PVE 宿主機上執行,而不是在中央控制機執行"
+    bash 00-set-static-ip.sh
+    ;;` : '';
+  const usageLine = platform==='pve' ? '用法: $0 {network|check|install|verify}' : '用法: $0 {check|install|verify}';
+
+  return `#!/usr/bin/env bash
+# Vista AI 叢集一鍵部署入口
+# 用法: 於中央控制機(可 SSH 到所有節點的主機)執行
+#   0) ./deploy.sh network  -> (僅 PVE) 於宿主機執行,批量塞入 Static IP/Hostname
+#   1) ./deploy.sh check    -> 僅測試連線,不做任何變更
+#   2) ./deploy.sh install  -> 執行完整部署
+#   3) ./deploy.sh verify   -> 部署完成後執行驗收
+
+set -euo pipefail
+cd "$(dirname "$0")"
+
+MODE="\${1:-}"
+
+case "$MODE" in${networkCase}
+  check)
+    command -v ansible-playbook >/dev/null 2>&1 || { echo "❌ 找不到 ansible-playbook,請先安裝: sudo apt-get install -y ansible"; exit 1; }
+    echo "=== [客戶: ${customerName}] 測試節點連線 ==="
+    ansible -i inventory.yml wazuh_cluster -m ping
+    ;;
+  install)
+    command -v ansible-playbook >/dev/null 2>&1 || { echo "❌ 找不到 ansible-playbook,請先安裝: sudo apt-get install -y ansible"; exit 1; }
+    echo "=== [客戶: ${customerName}] 開始部署 Vista AI 叢集 ==="
+    ansible-playbook -i inventory.yml site.yml
+    ;;
+  verify)
+    command -v ansible-playbook >/dev/null 2>&1 || { echo "❌ 找不到 ansible-playbook,請先安裝: sudo apt-get install -y ansible"; exit 1; }
+    echo "=== [客戶: ${customerName}] 執行驗收檢查 ==="
+    ansible-playbook -i inventory.yml verify.yml
+    ;;
+  *)
+    echo "${usageLine}"
+    exit 1
+    ;;
+esac
+`;
+}
+
+function buildSpecSummary(data){
+  const allHosts = [
+    ...data.idx.map(h=>({...h, role:'Indexer'})),
+    ...data.mgr.map((h,i)=>({...h, role:i===0?'Manager (Master)':'Manager (Worker)'})),
+    ...data.dash.map(h=>({...h, role:'Dashboard'})),
+    ...data.lb.map((h,i)=>({...h, role:i===0?'LB (MASTER)':'LB (BACKUP)'})),
+    ...data.nids.map(h=>({...h, role:'NIDS'})),
+  ];
+  let out = `# 硬體規格總表 - ${data.customerName}\n\n`;
+  out += `| 角色 | 主機名稱 | IP | CPU (核) | RAM (GB) | OS Disk (GB) | Data Disk (GB) |\n`;
+  out += `| --- | --- | --- | --- | --- | --- | --- |\n`;
+  allHosts.forEach(h=>{
+    out += `| ${h.role} | ${h.name} | ${h.ip} | ${h.cpu||'-'} | ${h.ram||'-'} | ${h.osdiskRaw?(h.osdiskRaw+' '+h.osdiskUnit):'-'} | ${h.datadiskRaw?(h.datadiskRaw+' '+h.datadiskUnit):'-'} |\n`;
+  });
+  out += `\n> 此表由網頁工具自動產生,實際部署時 site.yml 會在前置檢查階段比對宣告規格與 VM 實際偵測到的 CPU/RAM,若不符會顯示警告(僅提醒,不會中止部署)。\n`;
+  out += `\n## 網路設定\n\n`;
+  out += `| 項目 | 值 |\n| --- | --- |\n`;
+  out += `| VIP | ${data.vip || '(未使用,LB 僅 1 台)'} |\n`;
+  out += `| VIP CIDR | ${data.vipCidr} |\n`;
+  out += `| DNS 伺服器 | ${data.dnsServer || '-'} |\n`;
+  out += `| Gateway | ${data.gateway || '-'} |\n`;
+  return out;
+}
+
+function buildReadme(customerName, platform){
+  const step0 = platform==='pve'
+    ? `0. **(僅 Proxmox VE)先在 PVE 宿主機執行靜態 IP 注入**:把 \`00-set-static-ip.sh\` 帶到 PVE 宿主機(不是中央控制機)執行 \`bash 00-set-static-ip.sh\`,或用 \`./deploy.sh network\`(若你把整包也放在宿主機上)。此步驟需要各 VM 已安裝 QEMU Guest Agent。\n`
+    : platform==='vmware'
+    ? `0. **(VMware vSphere)先參考 \`00-vmware-customize-notes.md\`**,依裡面的 govc / PowerCLI 指令範本,自行在有 vCenter 連線權限的環境執行靜態 IP 注入(此工具不儲存/不接觸 vCenter 帳密,無法自動執行)。\n`
+    : `0. 若 VM 尚未有正確的 IP,請先依你的平台自行完成靜態 IP 設定(此次選擇「其他平台」,故未產生對應腳本)。\n`;
+
+  return `# Vista AI 叢集部署包 - ${customerName}
+
+本資料夾由「Vista AI 叢集部署設定產生器」自動產生,包含此客戶專屬的 Ansible inventory / 變數,以及共用的部署邏輯 (roles)。
+
+## 使用前準備
+
+${step0}1. 在中央控制機安裝 Ansible:
+   \`\`\`
+   sudo apt-get update && sudo apt-get install -y ansible
+   \`\`\`
+2. 準備憑證:先用 \`wazuh-certs-tool.sh\` 依 inventory.yml 內的主機名稱產生憑證,
+   把每台的 \`<hostname>.pem\` / \`<hostname>-key.pem\` / \`root-ca.pem\` / \`admin.pem\` / \`admin-key.pem\`
+   放進本資料夾底下的 \`certs/\` 目錄 (與 inventory 內主機名稱一致)。
+3. 確認 group_vars/all.yml 內的密碼欄位已填入 (若你在網頁上留空,請手動補上再執行)。
+
+## 執行順序
+
+\`\`\`bash
+chmod +x deploy.sh
+${platform==='pve' ? './deploy.sh network   # (僅 PVE,於宿主機執行) 批量塞入 Static IP/Hostname\n' : ''}./deploy.sh check      # 先確認所有節點 SSH 可連通
+./deploy.sh install    # 執行完整部署 (約 15-30 分鐘,視節點數與網速)
+./deploy.sh verify     # 部署完成後跑驗收腳本,確認叢集健康
+\`\`\`
+
+## 重要安全提醒
+
+- \`group_vars/all.yml\` 內含叢集金鑰與密碼,**請勿上傳到公開 git repo 或分享給不相關人員**。
+- 部署完成後請立即透過 \`wazuh-passwords-tool.sh\` 更新 OpenSearch/Dashboard 內建帳號密碼,
+  不要長期使用本工具產生的初始密碼。
+- 若品牌需求為對外顯示「Vista AI」,請另外處理 Dashboard 的 branding 設定與憑證 DN
+  (本套件的憑證 DN 樣板已預設使用 VistaAI 作為 O/OU,而非 Wazuh)。
+
+## 目錄結構
+
+\`\`\`
+inventory.yml           # 本次客戶的主機清單
+group_vars/all.yml      # 本次客戶的密碼/金鑰/VIP/DNS/Gateway 等變數
+site.yml                # 主要部署 playbook
+verify.yml              # 驗收檢查 playbook
+deploy.sh               # 一鍵執行入口
+00-set-static-ip.sh     # (僅 PVE) 宿主機批量塞 IP 腳本
+00-vmware-customize-notes.md # (僅 VMware) govc/PowerCLI 操作指引
+roles/                  # 各角色的建置邏輯 (Indexer/Manager/Dashboard/LB/NIDS)
+certs/                  # 憑證存放處 (需自行放入,不含在此 zip 中)
+\`\`\`
+`;
+}
+
+function readForm(){
+  const customerName = document.getElementById('customerName').value.trim() || 'customer';
+  const sshUser = document.getElementById('sshUser').value.trim() || 'ansible';
+  const sshPass = document.getElementById('sshPass').value;
+  let clusterKey = document.getElementById('clusterKey').value.trim();
+  if(!clusterKey) clusterKey = randomHex(32);
+  const vip = document.getElementById('vipAddr').value.trim();
+  const vipCidr = document.getElementById('vipCidr').value.trim() || '24';
+  const dnsServer = document.getElementById('dnsServer').value.trim();
+  const gateway = document.getElementById('gatewayAddr').value.trim();
+  const platform = document.getElementById('hvPlatform').value;
+  const lbHostsPreview = collectHosts('lb');
+  const needsVip = lbHostsPreview.length >= 2;
+  const opensearchPassField = document.getElementById('opensearchPassInput').value.trim();
+  const opensearchPass = opensearchPassField || randomPassword(16);
+
+  return {
+    customerName, sshUser, sshPass, clusterKey, vip, vipCidr, dnsServer, gateway, platform, opensearchPass, needsVip,
+    idx: collectHosts('idx'),
+    mgr: collectHosts('mgr'),
+    dash: collectHosts('dash'),
+    lb: collectHosts('lb'),
+    nids: collectHosts('nids'),
+  };
+}
+
+function validate(data){
+  const errs = [];
+  if(!data.idx.length) errs.push('至少需要 1 台 Indexer 且填妥主機名稱與 IP');
+  if(!data.mgr.length) errs.push('至少需要 1 台 Manager 且填妥主機名稱與 IP');
+  if(data.needsVip && !data.vip) errs.push('LB 有 2 台以上,需填寫 VIP');
+  return errs;
+}
+
+function previewInventory(){
+  const data = readForm();
+  const errs = validate(data);
+  const box = document.getElementById('previewBox');
+  box.style.display = 'block';
+  if(errs.length){
+    box.value = '⚠️ 尚有欄位未填妥:\\n- ' + errs.join('\\n- ');
+    return;
+  }
+  box.value = buildInventory(data);
+}
+
+function copyCred(id){
+  const el = document.getElementById(id);
+  el.select();
+  document.execCommand('copy');
+}
+
+async function generatePackage(){
+  const status = document.getElementById('status');
+  const data = readForm();
+  const errs = validate(data);
+  if(errs.length){
+    status.className = 'err';
+    status.textContent = '⚠️ ' + errs.join('; ');
+    return;
+  }
+
+  status.className = '';
+  status.textContent = '產生中...';
+
+  const zip = new JSZip();
+  const root = zip.folder(data.customerName + '-vista-ai-deploy');
+
+  root.file('inventory.yml', buildInventory(data));
+  root.folder('group_vars').file('all.yml', buildGroupVars(data));
+  root.file('site.yml', buildSitePlaybook());
+  root.file('verify.yml', buildVerifyPlaybook());
+  root.file('deploy.sh', buildDeploySh(data.customerName, data.platform));
+  if(data.platform === 'pve'){
+    root.file('00-set-static-ip.sh', buildPveStage0Script(data));
+  } else if(data.platform === 'vmware'){
+    root.file('00-vmware-customize-notes.md', buildVmwareNotes(data));
+  }
+  root.file('README.md', buildReadme(data.customerName, data.platform));
+  root.file('HARDWARE_SPEC.md', buildSpecSummary(data));
+
+  root.folder('roles/indexer/tasks').file('main.yml', buildIndexerRole());
+  root.folder('roles/indexer/handlers').file('main.yml', buildHandlers('indexer'));
+  root.folder('roles/indexer_security_init/tasks').file('main.yml', buildIndexerSecurityInitRole());
+  root.folder('roles/manager/tasks').file('main.yml', buildManagerRole());
+  root.folder('roles/manager/handlers').file('main.yml', buildHandlers('manager'));
+  root.folder('roles/dashboard/tasks').file('main.yml', buildDashboardRole());
+  root.folder('roles/dashboard/handlers').file('main.yml', buildHandlers('dashboard'));
+  root.folder('roles/loadbalancer/tasks').file('main.yml', buildLbRole());
+  root.folder('roles/loadbalancer/handlers').file('main.yml', buildHandlers('loadbalancer'));
+  root.folder('roles/nids/tasks').file('main.yml', buildNidsRole());
+
+  const templates = buildTemplates();
+  Object.entries(templates).forEach(([path, content])=>{
+    root.file(path, content);
+  });
+
+  root.folder('certs').file('README.txt', '請將 wazuh-certs-tool.sh 產生的憑證檔案放到這裡 (依 inventory 主機名稱命名)。\\n');
+
+  try{
+    const blob = await zip.generateAsync({type:'blob'});
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = data.customerName + '-vista-ai-deploy.zip';
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    URL.revokeObjectURL(url);
+    status.className = 'ok';
+    status.textContent = '✅ 已產生並下載 ' + data.customerName + '-vista-ai-deploy.zip';
+    document.getElementById('credOpensearchPass').value = data.opensearchPass;
+    document.getElementById('credClusterKey').value = data.clusterKey;
+    document.getElementById('credsBox').style.display = 'block';
+    if(!document.getElementById('opensearchPassInput').value.trim()){
+      document.getElementById('opensearchPassInput').value = data.opensearchPass;
+    }
+  }catch(e){
+    status.className = 'err';
+    status.textContent = '❌ 產生失敗: ' + e.message;
+  }
+}
+</script>
+</body>
+</html>
