@@ -260,6 +260,7 @@
     <div class="actions">
       <button class="btn-primary" onclick="generatePackage()">📦 產生並下載部署包</button>
       <button class="btn-ghost" onclick="previewInventory()">👁 預覽 inventory.yml</button>
+      <button class="btn-ghost" onclick="previewSop()">👁 預覽 SOP.md</button>
     </div>
     <div id="status"></div>
     <div id="credsBox" style="display:none; margin-top:14px; background:var(--panel2); border:1px solid var(--accent); border-radius:8px; padding:14px 16px;">
@@ -2523,6 +2524,18 @@ function previewInventory(){
     return;
   }
   box.value = buildInventory(data);
+}
+
+function previewSop(){
+  const data = readForm();
+  const errs = validate(data);
+  const box = document.getElementById('previewBox');
+  box.style.display = 'block';
+  if(errs.length){
+    box.value = '⚠️ 尚有欄位未填妥:\\n- ' + errs.join('\\n- ');
+    return;
+  }
+  box.value = buildSopManual(data);
 }
 
 function copyCred(id){
