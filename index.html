@@ -250,6 +250,7 @@
 
   <div class="card">
     <h2>NIDS 詳細資料(Suricata,選填) <span class="badge" id="nidsCountBadge"></span></h2>
+    <div class="hint" style="margin-bottom:10px;">NIDS 需要接收交換器的 mirror/SPAN port 流量才有作用,每台可填「監聽介面」名稱;不確定編號可留空,部署時會自動偵測(僅一張非管理網卡時才會自動採用,否則會中止並提示手動指定)。</div>
     <div id="nidsHosts"></div>
   </div>
 
@@ -316,6 +317,7 @@ function renderHostGroup(role){
     osdiskUnit: b.querySelector('.osdisk-unit')?.value || '',
     datadisk: b.querySelector('.datadisk-input')?.value || '',
     datadiskUnit: b.querySelector('.datadisk-unit')?.value || '',
+    captureIface: b.querySelector('.captureiface-input')?.value || '',
   }));
 
   let html = '';
@@ -337,6 +339,10 @@ function renderHostGroup(role){
         <div class="vmid-wrap" style="display:grid;grid-template-columns:1fr;gap:8px;margin-top:6px;">
           <input type="text" class="vmid-input" placeholder="PVE VM ID(例如 104)" value="${e.vmid||''}">
         </div>
+        ${role==='nids' ? `<div style="margin-top:6px;">
+          <input type="text" class="captureiface-input" placeholder="監聽介面(mirror port)名稱,例如 ens19,留空則部署時自動偵測" value="${e.captureIface||''}">
+          <span class="u" style="display:block;margin-top:2px;">接收 SPAN/mirror 流量的網卡。不確定編號可留空:部署時會自動排除管理網卡與 lo,若剩下「恰好一張」網卡就自動採用;若無法唯一判斷會直接中止並列出偵測到的介面,要求手動指定,不會用猜的。</span>
+        </div>` : ''}
         <div class="spec-row" style="grid-template-columns:1fr 1fr 1fr 1fr;">
           <div>
             <input type="number" class="cpu-input" placeholder="CPU 核心" min="1" value="${e.cpu||meta.cpuRec}">
@@ -555,7 +561,8 @@ function collectHosts(role){
     const datadiskUnit = b.querySelector('.datadisk-unit')?.value || 'GB';
     const osdisk = toGB(osdiskRaw, osdiskUnit);
     const datadisk = toGB(datadiskRaw, datadiskUnit);
-    if(name && ip) hosts.push({name, ip, vmid, cpu, ram, osdisk, datadisk, osdiskRaw, osdiskUnit, datadiskRaw, datadiskUnit});
+    const captureIface = b.querySelector('.captureiface-input')?.value.trim() || '';
+    if(name && ip) hosts.push({name, ip, vmid, cpu, ram, osdisk, datadisk, osdiskRaw, osdiskUnit, datadiskRaw, datadiskUnit, captureIface});
   });
   return hosts;
 }
@@ -582,6 +589,7 @@ function buildInventory(data){
       if(h.ram) line += ` spec_ram_gb=${h.ram}`;
       if(h.osdisk) line += ` spec_os_disk_gb=${h.osdisk}`;
       if(h.datadisk) line += ` spec_data_disk_gb=${h.datadisk}`;
+      if(h.captureIface) line += ` capture_iface=${h.captureIface}`;
       out += line + '\n';
     });
     return out + '\n';
@@ -1057,6 +1065,68 @@ function buildNidsRole(){
   ansible.builtin.command: suricata-update
   changed_when: true
 
+# --- 鏡像埠(mirror port)介面判斷 ---
+# capture_iface 若已在 inventory.yml 該主機那行指定(例如 capture_iface=ens19)則直接採用;
+# 否則自動排除 lo 與管理介面(ansible_default_ipv4.interface),
+# 剩下「恰好一張」網卡才自動採用,避免猜錯導致監控形同虛設。
+- name: 列出候選鏡像埠介面(排除 lo 與管理介面)
+  ansible.builtin.set_fact:
+    _mirror_iface_candidates: "{{ ansible_interfaces | difference(['lo', ansible_default_ipv4.interface | default('')]) }}"
+  when: capture_iface is not defined or capture_iface == ''
+
+- name: 只有一張候選網卡時自動採用為鏡像埠介面
+  ansible.builtin.set_fact:
+    capture_iface: "{{ _mirror_iface_candidates[0] }}"
+  when:
+    - capture_iface is not defined or capture_iface == ''
+    - (_mirror_iface_candidates | default([]) | length) == 1
+
+- name: 無法唯一判斷鏡像埠介面時中止,要求人工指定
+  ansible.builtin.fail:
+    msg: >-
+      無法自動判斷 {{ inventory_hostname }} 的鏡像埠(mirror port)介面,
+      偵測到的候選網卡: {{ _mirror_iface_candidates | default([]) }}(管理介面 {{ ansible_default_ipv4.interface | default('未知') }} 已排除)。
+      請在 inventory.yml 這台主機那一行加上 capture_iface=<介面名稱>(例如 ens19)後重新執行,
+      或用 ansible-playbook ... --limit {{ inventory_hostname }} --extra-vars "capture_iface=ens19" 單台指定。
+  when:
+    - capture_iface is not defined or capture_iface == ''
+    - (_mirror_iface_candidates | default([]) | length) != 1
+
+- name: 將鏡像埠介面設為 promiscuous mode 並啟用(立即生效)
+  ansible.builtin.command: ip link set dev {{ capture_iface }} up promisc on
+  changed_when: true
+
+- name: 寫入開機常駐的 promiscuous mode systemd service
+  ansible.builtin.copy:
+    dest: /etc/systemd/system/nids-mirror-promisc.service
+    content: |
+      [Unit]
+      Description=Set NIDS mirror port {{ capture_iface }} to promiscuous mode
+      After=network.target
+
+      [Service]
+      Type=oneshot
+      ExecStart=/usr/sbin/ip link set dev {{ capture_iface }} up promisc on
+      RemainAfterExit=true
+
+      [Install]
+      WantedBy=multi-user.target
+    mode: "0644"
+
+- name: 啟用開機常駐 promiscuous mode service
+  ansible.builtin.systemd:
+    name: nids-mirror-promisc.service
+    enabled: true
+    state: started
+    daemon_reload: true
+
+- name: 將 Suricata 監聽介面指向鏡像埠(取代預設的 eth0)
+  ansible.builtin.replace:
+    path: /etc/suricata/suricata.yaml
+    regexp: 'interface: eth0'
+    replace: "interface: {{ capture_iface }}"
+  notify: restart suricata
+
 - name: 匯入 Wazuh GPG key 並安裝 agent
   ansible.builtin.shell: |
     curl -s https://packages.wazuh.com/key/GPG-KEY-WAZUH | gpg --dearmor -o /usr/share/keyrings/wazuh.gpg --yes
@@ -1248,7 +1318,8 @@ function buildHandlers(role){
   const map = {
     indexer: 'wazuh-indexer',
     manager: 'wazuh-manager',
-    dashboard: 'wazuh-dashboard'
+    dashboard: 'wazuh-dashboard',
+    nids: 'suricata'
   };
   if(role==='manager'){
     return `---
@@ -1714,6 +1785,7 @@ async function generatePackage(){
   root.folder('roles/loadbalancer/tasks').file('main.yml', buildLbRole());
   root.folder('roles/loadbalancer/handlers').file('main.yml', buildHandlers('loadbalancer'));
   root.folder('roles/nids/tasks').file('main.yml', buildNidsRole());
+  root.folder('roles/nids/handlers').file('main.yml', buildHandlers('nids'));
 
   const templates = buildTemplates();
   Object.entries(templates).forEach(([path, content])=>{
