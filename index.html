@@ -257,6 +257,35 @@
   <div class="card">
     <h2>產生設定包</h2>
     <div class="hint">會產出:inventory.yml、group_vars/all.yml、site.yml(主 playbook,含自動產生憑證)、roles 內各角色 tasks、verify.yml(驗收腳本)、deploy.sh(一鍵執行入口)、README.md、SOP.md(自動化卡住時可接手的完整手動部署手冊)。全部打包成一個 zip。</div>
+
+    <div style="background:var(--panel2); border:1px solid var(--border); border-radius:8px; padding:14px 16px; margin:12px 0;">
+      <div style="font-weight:700; font-size:13px; margin-bottom:10px;">📦 這包下載下來怎麼用</div>
+
+      <div style="font-size:12.5px; color:var(--muted); margin-bottom:4px;">解壓縮後,在<strong style="color:var(--text);">中央控制機</strong>(能 SSH 連到全部節點的那台,不是任何一台 Wazuh 節點本身)依序執行:</div>
+      <ol style="font-size:12.5px; color:var(--muted); line-height:1.9; margin:6px 0 12px 18px; padding:0;">
+        <li><strong style="color:var(--text);">(僅 Proxmox VE)</strong>先把 <code>00-set-static-ip.sh</code> 帶到 <strong style="color:var(--text);">PVE 宿主機</strong>(不是中央控制機)執行,批量幫各 VM 設好靜態 IP/主機名稱。VMware 則參考 <code>00-vmware-customize-notes.md</code> 自行操作,「其他平台」略過此步。</li>
+        <li>中央控制機裝 Ansible:<code>sudo apt-get install -y ansible</code></li>
+        <li><code>chmod +x deploy.sh</code></li>
+        <li><code>./deploy.sh check</code> — 只測試 SSH 連線,不改任何東西,先確認全部節點連得到</li>
+        <li><code>./deploy.sh install</code> — 執行完整部署(約 15–30 分鐘),背後會依序:自動產生並分發 TLS 憑證 → 全主機基礎環境設定(裝套件/關 swap)→ Indexer 叢集 → Manager 叢集 + Filebeat → Dashboard → LB(如有)→ NIDS(如有)</li>
+        <li><code>./deploy.sh verify</code> — 部署完成後跑健康檢查(對應 verify.yml)</li>
+      </ol>
+
+      <div style="font-size:12.5px; color:var(--muted); margin-bottom:4px;">各檔案功能:</div>
+      <ul style="font-size:12.5px; color:var(--muted); line-height:1.9; margin:6px 0 0 18px; padding:0;">
+        <li><code>deploy.sh</code> — 一鍵入口,上面 network/check/install/verify 四個指令都是呼叫這支</li>
+        <li><code>inventory.yml</code> — 這次部署的主機清單(IP、規格),Ansible 靠這個知道要連哪些機器</li>
+        <li><code>group_vars/all.yml</code> — 這次的密碼、叢集金鑰、VIP/DNS/Gateway 等變數</li>
+        <li><code>site.yml</code> — 主要部署邏輯(deploy.sh install 實際執行的內容)</li>
+        <li><code>verify.yml</code> — 部署完成後的驗收檢查(deploy.sh verify 執行的內容)</li>
+        <li><code>roles/</code> — 各角色(common/certs_bootstrap/indexer/manager/dashboard/loadbalancer/nids)實際安裝步驟的來源,想知道某個環節具體做了什麼可以直接打開看</li>
+        <li><code>certs/</code> — TLS 憑證存放處,執行 site.yml 時自動產生,不用自己放</li>
+        <li><code>README.md</code> — 完整文字版使用說明(跟這裡的內容大致對應)</li>
+        <li><code>HARDWARE_SPEC.md</code> — 這次填寫的硬體規格總表,方便跟客戶對規格</li>
+        <li><code>SOP.md</code> — 自動化中途卡住/失敗時,可以直接接手做完的完整手動指令清單</li>
+      </ul>
+    </div>
+
     <div class="actions">
       <button class="btn-primary" onclick="generatePackage()">📦 產生並下載部署包</button>
       <button class="btn-ghost" onclick="previewInventory()">👁 預覽 inventory.yml</button>
