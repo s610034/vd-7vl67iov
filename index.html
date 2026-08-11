@@ -262,8 +262,15 @@
       <div style="font-weight:700; font-size:13px; margin-bottom:10px;">📦 這包下載下來怎麼用</div>
 
       <div style="font-size:12.5px; color:var(--muted); margin-bottom:4px;">解壓縮後,在<strong style="color:var(--text);">中央控制機</strong>(能 SSH 連到全部節點的那台,不是任何一台 Wazuh 節點本身)依序執行:</div>
-      <ol style="font-size:12.5px; color:var(--muted); line-height:1.9; margin:6px 0 12px 18px; padding:0;">
-        <li><strong style="color:var(--text);">(僅 Proxmox VE)</strong>先把 <code>00-set-static-ip.sh</code> 帶到 <strong style="color:var(--text);">PVE 宿主機</strong>(不是中央控制機)執行,批量幫各 VM 設好靜態 IP/主機名稱。VMware 則參考 <code>00-vmware-customize-notes.md</code> 自行操作,「其他平台」略過此步。</li>
+      <div style="font-size:12.5px; color:var(--muted); margin:0 0 6px 0;">
+        <strong style="color:var(--text);">第 0 步(VM 靜態 IP)依你上面選的虛擬化平台,三種情況不一樣:</strong>
+      </div>
+      <ul style="font-size:12.5px; color:var(--muted); line-height:1.9; margin:0 0 10px 18px; padding:0;">
+        <li><strong style="color:var(--text);">Proxmox VE / KVM</strong>——把 <code>00-set-static-ip.sh</code> 帶到 <strong style="color:var(--text);">PVE 宿主機</strong>執行(不是中央控制機),用 <code>qm guest exec</code> 批量幫各 VM 寫入靜態 IP 與主機名稱。需要每台 VM 都已安裝 QEMU Guest Agent,不然這台會被跳過。</li>
+        <li><strong style="color:var(--text);">VMware vSphere</strong>——這個工具不儲存/不碰 vCenter 帳密,沒辦法自動執行,只能產生 <code>00-vmware-customize-notes.md</code> 給你參考:裡面是 govc 或 PowerCLI 的**指令範本**(不是可直接跑的腳本),要你自己填入 vCenter 帳密/VM 名稱後手動執行,把每台 VM 的 IP/Gateway/DNS 設好。執行完建議先 ping/ssh 確認每台新 IP 連得到,再往下走。</li>
+        <li><strong style="color:var(--text);">其他平台 / VM 已有 IP</strong>——工具假設這些 VM 早就有正確的 IP 了(DHCP 保留或你已手動設好),完全不會產生額外的網路注入腳本。這種情況直接跳過第 0 步,從下面「裝 Ansible」開始做。</li>
+      </ul>
+      <ol start="1" style="font-size:12.5px; color:var(--muted); line-height:1.9; margin:6px 0 12px 18px; padding:0;">
         <li>中央控制機裝 Ansible:<code>sudo apt-get install -y ansible</code></li>
         <li><code>chmod +x deploy.sh</code></li>
         <li><code>./deploy.sh check</code> — 只測試 SSH 連線,不改任何東西,先確認全部節點連得到</li>
