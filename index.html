@@ -256,7 +256,7 @@
 
   <div class="card">
     <h2>產生設定包</h2>
-    <div class="hint">會產出:inventory.yml、group_vars/all.yml、site.yml(主 playbook)、roles 內各角色 tasks、verify.yml(驗收腳本)、deploy.sh(一鍵執行入口)、README.md。全部打包成一個 zip。</div>
+    <div class="hint">會產出:inventory.yml、group_vars/all.yml、site.yml(主 playbook,含自動產生憑證)、roles 內各角色 tasks、verify.yml(驗收腳本)、deploy.sh(一鍵執行入口)、README.md、SOP.md(自動化卡住時可接手的完整手動部署手冊)。全部打包成一個 zip。</div>
     <div class="actions">
       <button class="btn-primary" onclick="generatePackage()">📦 產生並下載部署包</button>
       <button class="btn-ghost" onclick="previewInventory()">👁 預覽 inventory.yml</button>
@@ -613,6 +613,9 @@ function buildGroupVars(data){
   const idxNameList = data.idx.map(h=>`      - "${h.name}"`).join('\n');
   const idxDnList = data.idx.map(h=>`      - "CN=${h.name},OU=VistaAI,O=VistaAI,L=Taipei,C=TW"`).join('\n');
   const mgrMasterIp = data.mgr[0] ? data.mgr[0].ip : '';
+  // agent_connect_address: agent 端(NIDS 等)與 Dashboard API 該連去哪個位址。
+  // LB >= 2 台時走 VIP(有 keepalived 漂移);只有 1 台 LB 時直接打那台 LB 的 IP(沒有 VIP)。
+  const agentConnectAddress = (data.lb && data.lb.length >= 2) ? data.vip : (data.lb && data.lb[0] ? data.lb[0].ip : mgrMasterIp);
 
   return `# ============================================
 # Vista AI 叢集變數 - 客戶: ${data.customerName}
@@ -637,6 +640,14 @@ opensearch_admin_password: "${data.opensearchPass}"
 # --- Manager Master IP (供 worker 節點與 LB 設定引用) ---
 manager_master_ip: "${mgrMasterIp}"
 
+# --- Agent / Dashboard API 對外連線位址 (LB>=2 台走 VIP,只有 1 台 LB 就直接打該 LB IP) ---
+agent_connect_address: "${agentConnectAddress}"
+
+# --- Wazuh Dashboard 內建 API 帳號 (連線 Manager API 用,官方預設值,部署後建議透過
+#     wazuh-passwords-tool.sh 一併更新,目前保留預設以確保與 Manager 端一致可連通) ---
+wazuh_api_user: "wazuh-wui"
+wazuh_api_password: "wazuh-wui"
+
 # --- Indexer 節點清單 (供 opensearch.yml / filebeat.yml 樣板引用) ---
 indexer_ips:
 ${idxIpList || '      []'}
@@ -647,9 +658,13 @@ ${idxNameList || '      []'}
 indexer_node_dns:
 ${idxDnList || '      []'}
 
-# --- Wazuh 版本 ---
-wazuh_version: "4.8"
+# --- Wazuh 版本 (apt repo 固定吃 4.x stable channel 的最新版,這兩個版本號只影響
+#     filebeat module tarball 與 wazuh-template.json 要抓哪個 tag,兩者需彼此相容,
+#     若之後 Wazuh 大版本升級,同步更新這裡即可,不用改 role 內容) ---
+wazuh_version: "4.14"
 filebeat_version: "7.10.2"
+wazuh_filebeat_module_version: "0.4"
+wazuh_template_ref: "v4.14.7"
 
 # --- 憑證 DN 客製 (品牌隱蔽用,對外顯示 Vista AI 而非 Wazuh) ---
 cert_org: "VistaAI"
@@ -664,6 +679,13 @@ function buildSitePlaybook(){
 # Vista AI 叢集部署 - 主 Playbook
 # 使用方式: ansible-playbook -i inventory.yml site.yml --ask-vault-pass
 # (若 group_vars/all.yml 未加密則可省略 --ask-vault-pass)
+
+- name: 產生並分發叢集 TLS 憑證(於中央控制機本機執行 wazuh-certs-tool.sh)
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  roles:
+    - certs_bootstrap
 
 - name: 前置檢查
   hosts: wazuh_cluster
@@ -686,6 +708,12 @@ function buildSitePlaybook(){
       ansible.builtin.debug:
         msg: "⚠️ {{ inventory_hostname }} 宣告 RAM={{ spec_ram_gb }}G,實際偵測到約 {{ actual_ram_gb }}G,請確認 VM 資源是否配置正確"
       when: spec_ram_gb is defined and (actual_ram_gb | float) < (spec_ram_gb | float) - 1
+
+- name: VM 基礎環境設定(全部主機)
+  hosts: wazuh_cluster
+  become: true
+  roles:
+    - common
 
 - name: 部署 Indexer 儲存叢集
   hosts: indexer
@@ -730,6 +758,109 @@ function buildSitePlaybook(){
     - name: 顯示完成訊息
       ansible.builtin.debug:
         msg: "🎉 Vista AI 叢集部署完成,請執行 ansible-playbook -i inventory.yml verify.yml 進行驗收"
+`;
+}
+
+function buildCommonRole(){
+  return `---
+- name: 安裝基礎套件
+  ansible.builtin.apt:
+    name: [curl, wget, apt-transport-https, lsb-release, gnupg2, tar, chrony, net-tools]
+    state: present
+    update_cache: true
+
+- name: 寫入叢集主機 /etc/hosts(方便憑證 CN / 除錯時用主機名稱互連)
+  ansible.builtin.blockinfile:
+    path: /etc/hosts
+    marker: "# {mark} ANSIBLE MANAGED VISTA AI CLUSTER HOSTS"
+    block: |
+      {% for h in groups['wazuh_cluster'] %}
+      {{ hostvars[h].ansible_host }} {{ h }}
+      {% endfor %}
+
+- name: 關閉 swap(Indexer / Manager 效能要求,官方安裝手冊建議全部節點統一關閉)
+  ansible.builtin.command: swapoff -a
+  when: ansible_swaptotal_mb | default(0) > 0
+  changed_when: true
+
+- name: 從 /etc/fstab 註解掉 swap 掛載,避免重開機後又啟用
+  ansible.builtin.replace:
+    path: /etc/fstab
+    regexp: '^([^#].*\\sswap\\s.*)$'
+    replace: '#\\1'
+`;
+}
+
+function buildCertsBootstrapRole(){
+  return `---
+- name: 檢查是否已產生過憑證(certs/root-ca.pem 存在就略過,避免重跑覆蓋既有憑證)
+  ansible.builtin.stat:
+    path: "{{ playbook_dir }}/certs/root-ca.pem"
+  register: _certs_exist
+
+- name: 建立暫存工作目錄
+  ansible.builtin.file:
+    path: "{{ playbook_dir }}/.certs-build"
+    state: directory
+    mode: "0700"
+  when: not _certs_exist.stat.exists
+
+- name: 下載官方 wazuh-certs-tool.sh
+  ansible.builtin.get_url:
+    url: "https://packages.wazuh.com/4.x/wazuh-certs-tool.sh"
+    dest: "{{ playbook_dir }}/.certs-build/wazuh-certs-tool.sh"
+    mode: "0755"
+  when: not _certs_exist.stat.exists
+
+- name: 依 inventory 動態產生 config.yml(節點名稱與 IP 直接取自 inventory.yml,不用手key)
+  ansible.builtin.template:
+    src: config.yml.j2
+    dest: "{{ playbook_dir }}/.certs-build/config.yml"
+    mode: "0644"
+  when: not _certs_exist.stat.exists
+
+- name: 執行 wazuh-certs-tool.sh -A 產生全部節點憑證
+  ansible.builtin.command: bash wazuh-certs-tool.sh -A
+  args:
+    chdir: "{{ playbook_dir }}/.certs-build"
+  when: not _certs_exist.stat.exists
+  register: _certs_run
+  changed_when: true
+
+- name: 建立正式 certs/ 目錄
+  ansible.builtin.file:
+    path: "{{ playbook_dir }}/certs"
+    state: directory
+    mode: "0700"
+  when: not _certs_exist.stat.exists
+
+# wazuh-certs-tool.sh 產生的憑證檔名對應 config.yml 內每個節點的 name 欄位,
+# 因為 config.yml 是照 inventory_hostname 產生的,所以檔名會直接對上各 role
+# 「上傳憑證」步驟預期的 {{ '{{ inventory_hostname }}' }}.pem / -key.pem,不需要額外改名。
+- name: 搬移產生的憑證(*.pem)到 certs/
+  ansible.builtin.shell: |
+    set -e
+    shopt -s nullglob
+    for f in *.pem; do mv -f "$f" "{{ playbook_dir }}/certs/"; done
+  args:
+    chdir: "{{ playbook_dir }}/.certs-build"
+    executable: /bin/bash
+  when: not _certs_exist.stat.exists
+  changed_when: true
+
+- name: 驗證 root-ca.pem 確實產生成功
+  ansible.builtin.stat:
+    path: "{{ playbook_dir }}/certs/root-ca.pem"
+  register: _certs_verify
+
+- name: 憑證產生失敗時中止並提示
+  ansible.builtin.fail:
+    msg: >-
+      wazuh-certs-tool.sh 自動產生憑證失敗,找不到 certs/root-ca.pem。
+      請檢查 .certs-build/ 目錄內的執行輸出(通常是中央控制機連不到 packages.wazuh.com,
+      或 config.yml 格式有誤),排除後可刪除 .certs-build/ 重跑,或改回手動執行
+      wazuh-certs-tool.sh 並將產出的憑證放入 certs/ 目錄(SOP.md 內有完整手動步驟)。
+  when: not _certs_verify.stat.exists
 `;
 }
 
@@ -807,7 +938,28 @@ function buildIndexerRole(){
 
 function buildIndexerSecurityInitRole(){
   return `---
-- name: 執行 securityadmin.sh 初始化安全索引
+# Wazuh 4.x 官方包裝的 indexer-security-admin.sh 是 securityadmin.sh 的精簡包裝(路徑/版本
+# 可能隨小版本調整),兩者都檢查,優先用官方包裝版,不存在才退回底層 securityadmin.sh。
+- name: 檢查是否有官方包裝的 indexer-security-admin.sh
+  ansible.builtin.stat:
+    path: /usr/share/wazuh-indexer/bin/indexer-security-admin.sh
+  register: _indexer_sec_admin_wrapper
+
+- name: 執行 indexer-security-admin.sh 初始化安全索引(官方包裝版)
+  ansible.builtin.shell: |
+    JAVA_HOME="/usr/share/wazuh-indexer/jdk" \\
+    /usr/share/wazuh-indexer/bin/indexer-security-admin.sh \\
+      -backup /etc/wazuh-indexer/plugins/security/securityconfig/ \\
+      -cd /etc/wazuh-indexer/plugins/security/securityconfig/ \\
+      -nhnv \\
+      -cacert /etc/wazuh-indexer/certs/root-ca.pem \\
+      -cert /etc/wazuh-indexer/certs/admin.pem \\
+      -key /etc/wazuh-indexer/certs/admin-key.pem
+  register: sec_init
+  changed_when: "'Done with success' in sec_init.stdout"
+  when: _indexer_sec_admin_wrapper.stat.exists
+
+- name: 執行 securityadmin.sh 初始化安全索引(退回底層工具版)
   ansible.builtin.shell: |
     JAVA_HOME="/usr/share/wazuh-indexer/jdk" \\
     /usr/share/wazuh-indexer/plugins/opensearch-security/tools/securityadmin.sh \\
@@ -816,8 +968,9 @@ function buildIndexerSecurityInitRole(){
       -cert /etc/wazuh-indexer/certs/admin.pem \\
       -key /etc/wazuh-indexer/certs/admin-key.pem \\
       -h {{ ansible_host }} -p 9200 -icl -nhnv
-  register: sec_init
-  changed_when: "'Done with success' in sec_init.stdout"
+  register: sec_init_fallback
+  changed_when: "'Done with success' in sec_init_fallback.stdout"
+  when: not _indexer_sec_admin_wrapper.stat.exists
 
 # 建議:安全索引初始化完成後,立即改用官方 wazuh-passwords-tool.sh
 # 產生高強度密碼並更新 internal_users.yml,不要沿用預設 admin/admin
@@ -871,14 +1024,23 @@ function buildManagerRole(){
         <disabled>no</disabled>
       </cluster>
 
-- name: 下載 filebeat 7.10.2 (Wazuh 官方相容版本)
-  ansible.builtin.get_url:
-    url: https://artifacts.elastic.co/downloads/beats/filebeat/filebeat-7.10.2-amd64.deb
-    dest: /tmp/filebeat-7.10.2-amd64.deb
-
-- name: 安裝 filebeat
+- name: 移除可能已存在的一般版 filebeat(避免與 filebeat-oss 衝突,乾淨環境會直接略過)
   ansible.builtin.apt:
-    deb: /tmp/filebeat-7.10.2-amd64.deb
+    name: [filebeat, filebeat-oss]
+    state: absent
+    purge: false
+  failed_when: false
+
+# 用 Wazuh 自己包的 filebeat-oss,不用 elastic.co 官方版:一般版會撞到 Elastic 授權檢查,
+# 導致 ILM 把索引改名成 filebeat-7.10.2-* (Wazuh 樣板抓不到),也是本工具舊版沒發現的坑。
+- name: 下載 filebeat-oss 7.10.2 (Wazuh 官方套件庫版本)
+  ansible.builtin.get_url:
+    url: https://packages.wazuh.com/4.x/apt/pool/main/f/filebeat/filebeat-oss-7.10.2-amd64.deb
+    dest: /tmp/filebeat-oss-7.10.2-amd64.deb
+
+- name: 安裝 filebeat-oss
+  ansible.builtin.apt:
+    deb: /tmp/filebeat-oss-7.10.2-amd64.deb
 
 - name: 建立 filebeat 憑證目錄
   ansible.builtin.file:
@@ -899,13 +1061,13 @@ function buildManagerRole(){
 - name: 下載 wazuh filebeat module
   ansible.builtin.shell: |
     mkdir -p /usr/share/filebeat/module/
-    curl -s https://packages.wazuh.com/4.x/filebeat/wazuh-filebeat-0.1.tar.gz | tar -xvz -C /usr/share/filebeat/module/
+    curl -s https://packages.wazuh.com/4.x/filebeat/wazuh-filebeat-{{ wazuh_filebeat_module_version }}.tar.gz | tar -xvz -C /usr/share/filebeat/module/
   args:
     creates: /usr/share/filebeat/module/wazuh
 
 - name: 下載 wazuh-template.json
   ansible.builtin.get_url:
-    url: https://raw.githubusercontent.com/wazuh/wazuh/v4.8.0/extensions/filebeat/7.x/wazuh-template.json
+    url: https://raw.githubusercontent.com/wazuh/wazuh/{{ wazuh_template_ref }}/extensions/elasticsearch/7.x/wazuh-template.json
     dest: /etc/filebeat/wazuh-template.json
     mode: "0644"
 
@@ -915,15 +1077,60 @@ function buildManagerRole(){
     dest: /etc/filebeat/filebeat.yml
   notify: restart filebeat
 
-- name: 啟動服務
+- name: 啟動 wazuh-manager
   ansible.builtin.systemd:
-    name: "{{ item }}"
+    name: wazuh-manager
     enabled: true
     state: started
     daemon_reload: true
-  loop:
-    - wazuh-manager
-    - filebeat
+
+# --- Filebeat 管道匯入(舊版工具完全漏掉這段,少了它 alerts 進 OpenSearch 後
+#     解析欄位可能是空的,Dashboard 會看起來「有資料但都是原始 JSON」) ---
+- name: 確保 /var/ossec/logs/alerts 存在且權限正確
+  ansible.builtin.file:
+    path: /var/ossec/logs/alerts
+    state: directory
+    owner: wazuh
+    group: wazuh
+    mode: "0755"
+
+- name: 確保 alerts.json 存在
+  ansible.builtin.file:
+    path: /var/ossec/logs/alerts/alerts.json
+    state: touch
+    owner: wazuh
+    group: wazuh
+    mode: "0644"
+    modification_time: preserve
+    access_time: preserve
+
+- name: filebeat setup --pipelines(建立解析管道,只需成功一次)
+  ansible.builtin.command: filebeat setup --pipelines
+  register: _fb_pipelines
+  changed_when: "'ERROR' not in _fb_pipelines.stderr"
+  retries: 3
+  delay: 10
+  until: _fb_pipelines.rc == 0
+
+- name: filebeat setup --index-management(建立索引樣板)
+  ansible.builtin.command: filebeat setup --index-management
+  register: _fb_index_mgmt
+  changed_when: "'ERROR' not in _fb_index_mgmt.stderr"
+  retries: 3
+  delay: 10
+  until: _fb_index_mgmt.rc == 0
+
+- name: 清除 filebeat registry(避免沿用上次失敗狀態卡住)
+  ansible.builtin.file:
+    path: /var/lib/filebeat/registry
+    state: absent
+
+- name: 啟動 filebeat
+  ansible.builtin.systemd:
+    name: filebeat
+    enabled: true
+    state: restarted
+    daemon_reload: true
 `;
 }
 
@@ -976,6 +1183,25 @@ function buildDashboardRole(){
 
 # 品牌隱蔽:將 Dashboard 標題/Logo 換成 Vista AI (opensearch_dashboards.yml 內
 # opensearchDashboards.branding 區塊,或另外客製前端資源,請依實際版本調整)
+
+# 這個檔案原本工具完全沒產生,但少了它 Dashboard 裡的 Wazuh App(agent 管理/規則等)
+# 連不到 Manager API,是「畫面裝好了但核心功能是斷的」最容易漏掉的一步。
+- name: 確保 wazuh app 設定目錄存在
+  ansible.builtin.file:
+    path: /usr/share/wazuh-dashboard/data/wazuh/config
+    state: directory
+    mode: "0750"
+    owner: wazuh-dashboard
+    group: wazuh-dashboard
+
+- name: 寫入 wazuh.yml(Dashboard 連線 Manager API 設定)
+  ansible.builtin.template:
+    src: wazuh.yml.j2
+    dest: /usr/share/wazuh-dashboard/data/wazuh/config/wazuh.yml
+    owner: wazuh-dashboard
+    group: wazuh-dashboard
+    mode: "0640"
+  notify: restart wazuh-dashboard
 
 - name: 啟動服務
   ansible.builtin.systemd:
@@ -1055,10 +1281,22 @@ function buildLbRole(){
 
 function buildNidsRole(){
   return `---
-- name: 安裝 suricata 與相依套件
+- name: 安裝前置套件
   ansible.builtin.apt:
-    name: [suricata, jq, curl, gnupg]
+    name: [jq, curl, gnupg, software-properties-common]
     state: present
+    update_cache: true
+
+- name: 加入 Suricata PPA(取得較新且持續維護的穩定版,而非 Ubuntu 內建套件庫的舊版)
+  ansible.builtin.apt_repository:
+    repo: ppa:oisf/suricata-stable
+    state: present
+    update_cache: true
+
+- name: 安裝 suricata(PPA 穩定版)
+  ansible.builtin.apt:
+    name: suricata
+    state: latest
     update_cache: true
 
 - name: 更新 suricata rules
@@ -1127,17 +1365,45 @@ function buildNidsRole(){
     replace: "interface: {{ capture_iface }}"
   notify: restart suricata
 
-- name: 匯入 Wazuh GPG key 並安裝 agent
+- name: 匯入 Wazuh GPG key
   ansible.builtin.shell: |
     curl -s https://packages.wazuh.com/key/GPG-KEY-WAZUH | gpg --dearmor -o /usr/share/keyrings/wazuh.gpg --yes
     echo "deb [signed-by=/usr/share/keyrings/wazuh.gpg] https://packages.wazuh.com/4.x/apt/ stable main" > /etc/apt/sources.list.d/wazuh.list
-    apt-get update -y && apt-get install -y wazuh-agent
+    apt-get update -y
+  args:
+    creates: /usr/share/keyrings/wazuh.gpg
 
-- name: 設定 agent 連線至 VIP
+# WAZUH_MANAGER / WAZUH_AGENT_NAME 讓套件安裝時就把 Manager 位址與主機名稱寫進 ossec.conf,
+# 對齊官方安裝手冊做法(比裝完再用 replace 改位址更不容易漏掉)。
+- name: 安裝 wazuh-agent(安裝時帶入 Manager 位址與 agent 名稱)
+  ansible.builtin.command: apt-get install -y wazuh-agent
+  environment:
+    WAZUH_MANAGER: "{{ agent_connect_address }}"
+    WAZUH_AGENT_NAME: "{{ inventory_hostname }}"
+  args:
+    creates: /var/ossec/bin/wazuh-control
+
+- name: 確認 agent 連線位址與套件安裝時一致(以防重跑 playbook 時位址已變更)
   ansible.builtin.replace:
     path: /var/ossec/etc/ossec.conf
     regexp: "<address>.*</address>"
-    replace: "<address>{{ vip_address }}</address>"
+    replace: "<address>{{ agent_connect_address }}</address>"
+
+- name: 向 Manager 註冊 agent 並取得 client key(agent-auth 自動註冊)
+  ansible.builtin.command: /var/ossec/bin/agent-auth -m {{ agent_connect_address }}
+  args:
+    creates: /var/ossec/etc/client.keys
+  register: _agent_auth
+  failed_when: false
+  changed_when: "_agent_auth.rc == 0"
+
+- name: agent-auth 註冊失敗時的提醒(通常是 Manager 尚未啟用自動註冊或防火牆擋 1515)
+  ansible.builtin.debug:
+    msg: >-
+      ⚠️ agent-auth 向 {{ agent_connect_address }}:1515 註冊失敗(rc={{ _agent_auth.rc | default('未知') }}),
+      請確認 Manager 端 authd 服務有啟用、防火牆開放 1515,或改用 manage_agents 手動核發 key 後
+      重跑本 role。
+  when: _agent_auth.rc is defined and _agent_auth.rc != 0
 
 - name: 加入 suricata log 來源
   ansible.builtin.blockinfile:
@@ -1213,6 +1479,15 @@ plugins.security.authcz.admin_dn:
 setup.template.json.enabled: true
 setup.template.json.path: "/etc/filebeat/wazuh-template.json"
 setup.template.json.name: "wazuh"
+setup.template.overwrite: true
+
+# 關掉 ILM,不然索引會被自動改名成 filebeat-7.10.2-*,Wazuh 的樣板/Dashboard 都抓不到
+setup.ilm.enabled: false
+
+logging.metrics.enabled: false
+
+# 關掉 Seccomp,Ubuntu 24.04(Kernel 6.8)上舊版 filebeat 開著這個會直接 SIGABRT 崩潰
+seccomp.enabled: false
 
 filebeat.modules:
   - module: wazuh
@@ -1236,6 +1511,14 @@ server.ssl.key: "/etc/wazuh-dashboard/certs/{{ inventory_hostname }}-key.pem"
 
 # 品牌客製 (依實際 Wazuh/OpenSearch Dashboards 版本調整參數名稱)
 # opensearchDashboards.branding.applicationTitle: "Vista AI"
+`,
+    'roles/dashboard/templates/wazuh.yml.j2': `hosts:
+  - default:
+      url: https://{{ agent_connect_address }}
+      port: 55000
+      username: "{{ wazuh_api_user }}"
+      password: "{{ wazuh_api_password }}"
+      run_as: false
 `,
     'roles/loadbalancer/templates/keepalived.conf.j2': `vrrp_script check_haproxy {
     script "killall -0 haproxy"
@@ -1309,6 +1592,23 @@ backend syslog_backend
     balance roundrobin
 {% for host in groups['manager_master'] + groups['manager_worker'] %}
     server {{ host }} {{ hostvars[host].ansible_host }}:514 check
+{% endfor %}
+`,
+    'roles/certs_bootstrap/templates/config.yml.j2': `nodes:
+  indexer:
+{% for h in groups['indexer'] %}
+    - name: {{ h }}
+      ip: {{ hostvars[h].ansible_host }}
+{% endfor %}
+  server:
+{% for h in groups['manager_master'] + groups['manager_worker'] %}
+    - name: {{ h }}
+      ip: {{ hostvars[h].ansible_host }}
+{% endfor %}
+  dashboard:
+{% for h in groups['dashboard'] %}
+    - name: {{ h }}
+      ip: {{ hostvars[h].ansible_host }}
 {% endfor %}
 `
   };
@@ -1652,14 +1952,17 @@ function buildReadme(customerName, platform){
 
 ## 使用前準備
 
-${step0}1. 在中央控制機安裝 Ansible:
+${step0}1. 在中央控制機安裝 Ansible(此機器需要能連到 packages.wazuh.com 以下載 wazuh-certs-tool.sh 與各套件):
    \`\`\`
    sudo apt-get update && sudo apt-get install -y ansible
    \`\`\`
-2. 準備憑證:先用 \`wazuh-certs-tool.sh\` 依 inventory.yml 內的主機名稱產生憑證,
-   把每台的 \`<hostname>.pem\` / \`<hostname>-key.pem\` / \`root-ca.pem\` / \`admin.pem\` / \`admin-key.pem\`
-   放進本資料夾底下的 \`certs/\` 目錄 (與 inventory 內主機名稱一致)。
+2. 憑證**不用自己產生**:\`site.yml\` 第一個 play 會自動在中央控制機本機下載並執行
+   \`wazuh-certs-tool.sh\`,依 inventory.yml 內的主機名稱產生對應憑證放進 \`certs/\`。
+   只有在中央控制機連不到官方套件庫、自動產生失敗時,才需要照 \`SOP.md\` 的「4. SSL 憑證生成」
+   章節手動跑一次,把產出的 \`*.pem\` 放進 \`certs/\` 後重新執行即可(偵測到已有憑證會自動跳過)。
 3. 確認 group_vars/all.yml 內的密碼欄位已填入 (若你在網頁上留空,請手動補上再執行)。
+4. **若 Ansible 自動化中途卡住或某步驟一直失敗**,不用等——\`SOP.md\` 是完全對應同一套邏輯、
+   帶入這次實際主機名稱/IP 的純手動指令清單,可以直接接手繼續做完剩下的步驟。
 
 ## 執行順序
 
@@ -1688,9 +1991,491 @@ verify.yml              # 驗收檢查 playbook
 deploy.sh               # 一鍵執行入口
 00-set-static-ip.sh     # (僅 PVE) 宿主機批量塞 IP 腳本
 00-vmware-customize-notes.md # (僅 VMware) govc/PowerCLI 操作指引
-roles/                  # 各角色的建置邏輯 (Indexer/Manager/Dashboard/LB/NIDS)
-certs/                  # 憑證存放處 (需自行放入,不含在此 zip 中)
+roles/                  # 各角色的建置邏輯 (common/certs_bootstrap/Indexer/Manager/Dashboard/LB/NIDS)
+certs/                  # 憑證存放處 (site.yml 執行時自動產生,失敗才需手動放入)
+SOP.md                  # 完整手動部署手冊 (自動化卡住時的備援,帶入本次實際主機資料)
 \`\`\`
+`;
+}
+
+function buildSopManual(data){
+  const mgrMaster = data.mgr[0];
+  const mgrWorkers = data.mgr.slice(1);
+  const mgrMasterIp = mgrMaster ? mgrMaster.ip : '(未填)';
+  const agentConnectAddress = (data.lb && data.lb.length >= 2) ? data.vip : (data.lb && data.lb[0] ? data.lb[0].ip : mgrMasterIp);
+  const idxIpsJson = '[' + data.idx.map(h=>`"${h.ip}"`).join(', ') + ']';
+  const idxNamesJson = '[' + data.idx.map(h=>`"${h.name}"`).join(', ') + ']';
+
+  const hostsTable = () => {
+    const rows = [
+      ...data.idx.map(h=>({...h, role:'Wazuh Indexer'})),
+      ...(mgrMaster ? [{...mgrMaster, role:'Wazuh Manager (Master)'}] : []),
+      ...mgrWorkers.map(h=>({...h, role:'Wazuh Manager (Worker)'})),
+      ...data.dash.map(h=>({...h, role:'Wazuh Dashboard'})),
+      ...data.lb.map((h,i)=>({...h, role: i===0 ? 'LB (MASTER 優先)' : 'LB (BACKUP)'})),
+      ...data.nids.map(h=>({...h, role:'NIDS (Suricata + Agent)'})),
+    ];
+    let out = `| 主機名稱 | IP 位址 | 規格 (CPU/RAM/OS Disk/Data Disk) | 角色 |\n| --- | --- | --- | --- |\n`;
+    rows.forEach(h=>{
+      const spec = `${h.cpu||'-'} Core / ${h.ram||'-'}GB / ${h.osdiskRaw||'-'}${h.osdiskUnit||''} / ${h.datadiskRaw||'-'}${h.datadiskUnit||''}`;
+      out += `| ${h.name} | ${h.ip} | ${spec} | ${h.role}${h.captureIface ? '(監聽介面 '+h.captureIface+')' : ''} |\n`;
+    });
+    return out;
+  };
+
+  const hostsFileBlock = [
+    ...data.idx, ...data.mgr, ...data.dash, ...data.lb, ...data.nids
+  ].map(h=>`${h.ip} ${h.name}`).join('\n');
+
+  const certConfigYml = `nodes:
+  indexer:
+${data.idx.map(h=>`    - name: ${h.name}\n      ip: ${h.ip}`).join('\n')}
+  server:
+${data.mgr.map(h=>`    - name: ${h.name}\n      ip: ${h.ip}`).join('\n')}
+  dashboard:
+${data.dash.map(h=>`    - name: ${h.name}\n      ip: ${h.ip}`).join('\n')}`;
+
+  const indexerSection = data.idx.map((h,i)=>`
+#### ${h.name} (${h.ip})
+
+\`\`\`bash
+curl -s https://packages.wazuh.com/key/GPG-KEY-WAZUH | sudo gpg --dearmor -o /usr/share/keyrings/wazuh.gpg
+echo "deb [signed-by=/usr/share/keyrings/wazuh.gpg] https://packages.wazuh.com/4.x/apt/ stable main" | sudo tee /etc/apt/sources.list.d/wazuh.list
+sudo apt update && sudo apt install -y wazuh-indexer
+\`\`\`
+
+編輯 \`/etc/wazuh-indexer/opensearch.yml\`:
+
+\`\`\`yaml
+cluster.name: "vista-ai-cluster"
+node.name: "${h.name}"
+node.roles: ["master", "data"]
+network.host: "${h.ip}"
+http.port: 9200
+transport.port: 9300
+
+discovery.seed_hosts: ${idxIpsJson}
+cluster.initial_master_nodes: ${idxNamesJson}
+
+plugins.security.ssl.transport.pemcert_filepath: /etc/wazuh-indexer/certs/${h.name}.pem
+plugins.security.ssl.transport.pemkey_filepath: /etc/wazuh-indexer/certs/${h.name}-key.pem
+plugins.security.ssl.transport.pemtrustedcas_filepath: /etc/wazuh-indexer/certs/root-ca.pem
+plugins.security.ssl.transport.enforce_hostname_verification: false
+
+plugins.security.ssl.http.enabled: true
+plugins.security.ssl.http.pemcert_filepath: /etc/wazuh-indexer/certs/${h.name}.pem
+plugins.security.ssl.http.pemkey_filepath: /etc/wazuh-indexer/certs/${h.name}-key.pem
+plugins.security.ssl.http.pemtrustedcas_filepath: /etc/wazuh-indexer/certs/root-ca.pem
+
+plugins.security.authcz.admin_dn:
+  - "CN=admin,OU=VistaAI,O=VistaAI,L=Taipei,C=TW"
+
+plugins.security.nodes_dn:
+${data.idx.map(n=>`  - "CN=${n.name},OU=VistaAI,O=VistaAI,L=Taipei,C=TW"`).join('\n')}
+\`\`\`
+
+放憑證並啟動:
+
+\`\`\`bash
+sudo mkdir -p /etc/wazuh-indexer/certs
+# 把 ${h.name}.pem / ${h.name}-key.pem / root-ca.pem / admin.pem / admin-key.pem 放進上面目錄
+sudo chown -R wazuh-indexer:wazuh-indexer /etc/wazuh-indexer/certs
+sudo chmod 500 /etc/wazuh-indexer/certs
+sudo chmod 400 /etc/wazuh-indexer/certs/*
+sudo systemctl daemon-reload && sudo systemctl enable wazuh-indexer && sudo systemctl restart wazuh-indexer
+\`\`\`
+${i===0 ? `
+**僅在 ${h.name}(第一台 Indexer)執行一次,初始化安全索引:**
+
+\`\`\`bash
+sudo /usr/share/wazuh-indexer/bin/indexer-security-admin.sh \\
+  -backup /etc/wazuh-indexer/plugins/security/securityconfig/ \\
+  -cd /etc/wazuh-indexer/plugins/security/securityconfig/ \\
+  -nhnv \\
+  -cacert /etc/wazuh-indexer/certs/root-ca.pem \\
+  -cert /etc/wazuh-indexer/certs/admin.pem \\
+  -key /etc/wazuh-indexer/certs/admin-key.pem
+# 若此路徑不存在,改用底層工具:
+# /usr/share/wazuh-indexer/plugins/opensearch-security/tools/securityadmin.sh \\
+#   -cd /etc/wazuh-indexer/opensearch-security -cacert .../root-ca.pem \\
+#   -cert .../admin.pem -key .../admin-key.pem -h ${h.ip} -p 9200 -icl -nhnv
+\`\`\`` : ''}`).join('\n');
+
+  const managerSection = data.mgr.map((h,i)=>`
+#### ${h.name} (${h.ip})${i===0 ? ' — Master' : ' — Worker'}
+
+\`\`\`bash
+sudo apt install -y wazuh-manager
+sudo systemctl enable wazuh-manager
+\`\`\`
+
+在 \`/var/ossec/etc/ossec.conf\` 的 \`</ossec_config>\` 前插入:
+
+\`\`\`xml
+<cluster>
+  <name>vista-ai-cluster</name>
+  <node_name>${h.name}</node_name>
+  <node_type>${i===0 ? 'master' : 'worker'}</node_type>
+  <key>${data.clusterKey}</key>
+  <interval>10s</interval>
+  <port>1516</port>
+  <bind_addr>0.0.0.0</bind_addr>
+  <nodes><node>${mgrMasterIp}</node></nodes>
+  <hidden>no</hidden>
+  <disabled>no</disabled>
+</cluster>
+\`\`\`
+
+\`\`\`bash
+sudo systemctl restart wazuh-manager
+\`\`\`
+
+**Filebeat OSS(此步驟很重要,不要裝成一般版 filebeat,細節見下方注意事項):**
+
+\`\`\`bash
+sudo systemctl stop filebeat >/dev/null 2>&1 || true
+wget https://packages.wazuh.com/4.x/apt/pool/main/f/filebeat/filebeat-oss-7.10.2-amd64.deb
+sudo dpkg -P filebeat filebeat-oss >/dev/null 2>&1 || true
+sudo dpkg -i filebeat-oss-7.10.2-amd64.deb
+curl -sSL https://packages.wazuh.com/4.x/filebeat/wazuh-filebeat-0.4.tar.gz | sudo tar -xvz -C /usr/share/filebeat/module/
+sudo curl -so /etc/filebeat/wazuh-template.json https://raw.githubusercontent.com/wazuh/wazuh/v4.14.7/extensions/elasticsearch/7.x/wazuh-template.json
+sudo chmod go+r /etc/filebeat/wazuh-template.json
+\`\`\`
+
+寫 \`/etc/filebeat/filebeat.yml\`:
+
+\`\`\`yaml
+filebeat.modules:
+  - module: wazuh
+    alerts: { enabled: true }
+    archives: { enabled: false }
+
+setup.template.json.enabled: true
+setup.template.json.path: "/etc/filebeat/wazuh-template.json"
+setup.template.json.name: "wazuh"
+setup.template.overwrite: true
+setup.ilm.enabled: false
+seccomp.enabled: false
+logging.metrics.enabled: false
+
+output.elasticsearch:
+  hosts: [${data.idx.map(x=>`"https://${x.ip}:9200"`).join(', ')}]
+  protocol: "https"
+  username: "admin"
+  password: "${data.opensearchPass}"
+  ssl.certificate_authorities: ["/etc/filebeat/certs/root-ca.pem"]
+  ssl.certificate: "/etc/filebeat/certs/${h.name}.pem"
+  ssl.key: "/etc/filebeat/certs/${h.name}-key.pem"
+  ssl.verification_mode: "full"
+\`\`\`
+
+憑證放好後(參考 Indexer 那步驟),接著:
+
+\`\`\`bash
+sudo mkdir -p /etc/filebeat/certs
+# 放入 ${h.name}.pem / ${h.name}-key.pem / root-ca.pem
+sudo mkdir -p /var/ossec/logs/alerts
+sudo chown -R wazuh:wazuh /var/ossec/logs/alerts 2>/dev/null || sudo chown -R root:root /var/ossec/logs/alerts
+sudo chmod 755 /var/ossec/logs/alerts
+sudo touch /var/ossec/logs/alerts/alerts.json
+sudo chmod 644 /var/ossec/logs/alerts/alerts.json
+
+sudo filebeat setup --pipelines
+sudo filebeat setup --index-management
+
+sudo systemctl stop filebeat
+sudo rm -rf /var/lib/filebeat/registry/
+sudo systemctl restart filebeat
+sudo systemctl enable filebeat
+\`\`\``).join('\n');
+
+  const dashboardSection = data.dash.map(h=>`
+#### ${h.name} (${h.ip})
+
+\`\`\`bash
+sudo apt install -y wazuh-dashboard
+\`\`\`
+
+編輯 \`/etc/wazuh-dashboard/opensearch_dashboards.yml\`:
+
+\`\`\`yaml
+server.port: 443
+server.host: "0.0.0.0"
+opensearch.hosts: ${data.idx.map(x=>`["https://${x.ip}:9200"]`)[0] ? '[' + data.idx.map(x=>`"https://${x.ip}:9200"`).join(', ') + ']' : '[]'}
+opensearch.username: "admin"
+opensearch.password: "${data.opensearchPass}"
+opensearch.ssl.certificateAuthorities: ["/etc/wazuh-dashboard/certs/root-ca.pem"]
+opensearch.ssl.verificationMode: full
+server.ssl.enabled: true
+server.ssl.certificate: "/etc/wazuh-dashboard/certs/${h.name}.pem"
+server.ssl.key: "/etc/wazuh-dashboard/certs/${h.name}-key.pem"
+\`\`\`
+
+**這一步官方文件很容易漏,一定要做**——編輯 \`/usr/share/wazuh-dashboard/data/wazuh/config/wazuh.yml\`
+(目錄不存在要自己建):
+
+\`\`\`yaml
+hosts:
+  - default:
+      url: https://${agentConnectAddress}
+      port: 55000
+      username: wazuh-wui
+      password: wazuh-wui
+      run_as: false
+\`\`\`
+
+\`\`\`bash
+sudo systemctl enable wazuh-dashboard
+sudo systemctl restart wazuh-dashboard
+\`\`\``).join('\n');
+
+  const nidsSection = data.nids.map(h=>`
+#### ${h.name} (${h.ip})${h.captureIface ? `,監聽介面 ${h.captureIface}` : '(監聽介面編號未預先填寫,依下方步驟現場判斷)'}
+
+**若不確定監聽介面編號**,先登入這台主機用 \`ip a\` 看有哪些網卡,排除 \`lo\` 跟你正在用來 SSH 連線的
+那張(通常是有拿到 IP、預設路由在上面那張,例如 \`ens18\`),剩下沒配 IP 的那張(例如 \`ens19\`)
+就是接 mirror/SPAN 的那張。若 VM 只有一張網卡,代表交換器的 mirror port 還沒接、或這台 VM 還沒加
+第二張網卡連過去,兩者都要先跟網路╱機房那邊確認好,不能用猜的。
+
+\`\`\`bash
+ip -brief link show    # 找出候選介面,排除 lo 與管理用介面
+\`\`\`
+
+netplan 雙網卡設定 (\`/etc/netplan/01-netcfg.yaml\`,依實際偵測到的介面名稱替換 ens18/ens19):
+
+\`\`\`yaml
+network:
+  version: 2
+  renderer: networkd
+  ethernets:
+    ens18:
+      addresses: [${h.ip}/${data.vipCidr}]
+      routes: [{to: default, via: ${data.gateway || '<gateway>'}}]
+      nameservers: {addresses: [${data.dnsServer || '8.8.8.8'}]}
+    ens19:            # 换成實際判斷出來的監聽介面
+      dhcp4: no
+      dhcp6: no
+      activation-mode: manual
+\`\`\`
+
+\`\`\`bash
+sudo netplan apply
+\`\`\`
+
+開機常駐混雜模式(把 ens19 換成實際介面名稱):
+
+\`\`\`bash
+sudo bash -c 'cat <<EOF > /etc/systemd/system/nids-mirror-promisc.service
+[Unit]
+Description=Set NIDS mirror port to promiscuous mode
+After=network.target
+
+[Service]
+Type=oneshot
+ExecStart=/sbin/ip link set dev ens19 up promisc on
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target
+EOF'
+sudo systemctl daemon-reload
+sudo systemctl enable --now nids-mirror-promisc.service
+ip link show ens19   # 輸出要有 PROMISC 標記
+\`\`\`
+
+安裝 Suricata(用 PPA 拿較新的穩定版,不要用 Ubuntu 內建套件庫的舊版):
+
+\`\`\`bash
+sudo add-apt-repository ppa:oisf/suricata-stable -y
+sudo apt update && sudo apt install -y suricata jq
+sudo sed -i 's/interface: eth0/interface: ens19/g' /etc/suricata/suricata.yaml   # ens19 換成實際介面
+sudo suricata-update
+sudo systemctl enable --now suricata
+\`\`\`
+
+安裝並註冊 Wazuh Agent:
+
+\`\`\`bash
+curl -s https://packages.wazuh.com/key/GPG-KEY-WAZUH | sudo gpg --dearmor -o /usr/share/keyrings/wazuh.gpg
+echo "deb [signed-by=/usr/share/keyrings/wazuh.gpg] https://packages.wazuh.com/4.x/apt/ stable main" | sudo tee /etc/apt/sources.list.d/wazuh.list
+sudo apt update
+sudo WAZUH_MANAGER='${agentConnectAddress}' WAZUH_AGENT_NAME='${h.name}' apt install -y wazuh-agent
+
+sudo bash -c 'cat <<EOF >> /var/ossec/etc/ossec.conf
+
+<ossec_config>
+  <localfile>
+    <log_format>json</log_format>
+    <location>/var/log/suricata/eve.json</location>
+  </localfile>
+</ossec_config>
+EOF'
+
+# 若安裝時沒自動註冊成功(沒有 /var/ossec/etc/client.keys),手動註冊:
+sudo /var/ossec/bin/agent-auth -m ${agentConnectAddress}
+
+sudo systemctl enable --now wazuh-agent
+\`\`\``).join('\n');
+
+  const lbSection = data.lb.length ? `
+LB 用 HAProxy(+ ${data.lb.length >= 2 ? 'Keepalived,因為有 ' + data.lb.length + ' 台需要 VIP 漂移' : '單台,不需要 Keepalived/VIP'}):
+
+\`\`\`bash
+sudo apt install -y haproxy${data.lb.length >= 2 ? ' keepalived' : ''}
+\`\`\`
+
+\`/etc/haproxy/haproxy.cfg\` 的重點是把 1514(agent)、1515(enrollment)、55000(API)、514(syslog)
+轉給所有 Manager 節點(${data.mgr.map(m=>`${m.name} ${m.ip}`).join('、')}),完整內容直接參考此包
+\`roles/loadbalancer/templates/haproxy.cfg.j2\` 展開後的結果即可,不重複貼在這裡。
+${data.lb.length >= 2 ? `
+\`/etc/keepalived/keepalived.conf\` 設定 VIP ${data.vip}/${data.vipCidr},MASTER 是 ${data.lb[0].name}
+(priority 101),其餘為 BACKUP(priority 100),vrrp_router_id 51,認證密碼用叢集金鑰前 8 碼。` : ''}
+` : '';
+
+  return `# Vista AI 叢集手動部署 SOP — ${data.customerName}
+
+> 這份文件跟自動化的 \`site.yml\` 邏輯是同一套,差別只是手動一步步做。
+> **自動化正常跑完全部就不需要看這份**;只有在 \`./deploy.sh install\` 中途某個 play 卡住/失敗時,
+> 才需要接手從失敗的那個階段開始手動做完,或用來對照排查是哪個環節出問題。
+> 產生時間: ${new Date().toISOString()}
+
+## 0. 這次部署的主機清單
+
+${hostsTable()}
+
+- SSH 帳號: \`${data.sshUser}\`(密碼${data.sshPass ? '已於產生設定包時填寫,请見 group_vars/all.yml' : '留空,部署時互動輸入'})
+- 叢集金鑰(cluster_key): \`${data.clusterKey}\`
+- OpenSearch/Dashboard admin 密碼: \`${data.opensearchPass}\`
+- Agent / Dashboard API 連線位址: \`${agentConnectAddress}\`${data.needsVip ? '(VIP,由 Keepalived 在 LB 間漂移)' : '(單台 LB 的 IP,沒有 VIP)'}
+
+## 1. 系統架構
+
+管理/叢集資料流走同一網段;NIDS 另外接 mirror/SPAN 流量。${data.platform==='pve' ? '本次選擇 Proxmox VE,PVE 宿主機需準備管理橋接器 (vmbr0) 與側錄專用橋接器 (vmbr1)。' : data.platform==='vmware' ? '本次選擇 VMware vSphere,請參考 00-vmware-customize-notes.md 完成 Guest Customization。' : '本次選擇「其他平台/VM 已有 IP」,假設網路層已就緒。'}
+
+${data.platform==='pve' ? `## 2. PVE 宿主機前置作業
+
+在 PVE 宿主機編輯 \`/etc/network/interfaces\`(範例,實際網卡名稱請依 \`ip a\` 確認):
+
+\`\`\`
+auto lo
+iface lo inet loopback
+
+# 管理網段
+auto vmbr0
+iface vmbr0 inet static
+  address <PVE 宿主機 IP>/24
+  gateway ${data.gateway || '<gateway>'}
+  bridge-ports <實體網卡1>
+  bridge-stp off
+  bridge-fd 0
+
+# NIDS 側錄網段(mirror/SPAN)
+auto vmbr1
+iface vmbr1 inet manual
+  bridge-ports <實體網卡2>
+  bridge-stp off
+  bridge-fd 0
+  post-up ip link set dev vmbr1 promisc on
+\`\`\`
+
+\`\`\`bash
+ifreload -a
+\`\`\`
+
+VM 建立時:CPU 模式設 \`host\`;NIDS 那台除了接 vmbr0 的管理網卡,要**多加一張接 vmbr1** 的網卡
+(作為監聽口)。
+
+` : ''}## ${data.platform==='pve' ? '3' : '2'}. 所有主機基礎環境設定
+
+在**全部 ${data.idx.length + data.mgr.length + data.dash.length + data.lb.length + data.nids.length} 台 VM** 上執行:
+
+\`\`\`bash
+sudo apt update && sudo apt install -y curl wget apt-transport-https lsb-release gnupg2 tar chrony net-tools
+
+sudo bash -c 'cat <<EOF >> /etc/hosts
+${hostsFileBlock}
+EOF'
+
+sudo swapoff -a
+sudo sed -i '/ swap / s/^\\(.*\\)$/#\\1/g' /etc/fstab
+
+# 僅 Indexer 節點需要:
+sudo sysctl -w vm.max_map_count=262144
+echo "vm.max_map_count=262144" | sudo tee -a /etc/sysctl.conf
+sudo sysctl -p
+\`\`\`
+
+## ${data.platform==='pve' ? '4' : '3'}. SSL 憑證生成(在中央控制機或任一台 Manager 執行一次即可)
+
+\`\`\`bash
+curl -sO https://packages.wazuh.com/4.x/wazuh-certs-tool.sh
+\`\`\`
+
+寫 \`config.yml\`:
+
+\`\`\`yaml
+${certConfigYml}
+\`\`\`
+
+\`\`\`bash
+bash wazuh-certs-tool.sh -A
+\`\`\`
+
+產生的 \`<主機名稱>.pem\` / \`<主機名稱>-key.pem\` / \`root-ca.pem\` / \`admin.pem\` / \`admin-key.pem\`
+分別依主機名稱送到對應主機。
+
+## ${data.platform==='pve' ? '5' : '4'}. Wazuh Indexer 部署
+${indexerSection}
+
+## ${data.platform==='pve' ? '6' : '5'}. Wazuh Manager 部署 + Filebeat OSS
+${managerSection}
+
+## ${data.platform==='pve' ? '7' : '6'}. Wazuh Dashboard 部署
+${dashboardSection}
+
+## ${data.platform==='pve' ? '8' : '7'}. 負載平衡 LB
+${lbSection || '本次未設定 LB。'}
+
+## ${data.platform==='pve' ? '9' : '8'}. NIDS(Suricata + Agent,鏡像埠側錄)
+${nidsSection || '本次未設定 NIDS。'}
+
+## ${data.platform==='pve' ? '10' : '9'}. 部署驗證清單
+
+1. **OpenSearch 節點狀態**(Dashboard → Indexer management → Dev Tools):
+   \`\`\`
+   GET /_cat/nodes?v
+   \`\`\`
+   應看到全部 ${data.idx.length} 台 Indexer,其中一台標記 cluster_manager \`*\`。
+
+2. **Manager 叢集狀態**(在 ${mgrMaster ? mgrMaster.name : 'Master'} 執行):
+   \`\`\`bash
+   sudo /var/ossec/bin/cluster_control -l
+   \`\`\`
+   應看到 ${data.mgr.map(m=>m.name).join('、')} 全部 Active。
+
+3. **索引已建立**:
+   \`\`\`bash
+   curl -s -k -u admin:${data.opensearchPass} https://${data.idx[0] ? data.idx[0].ip : '<indexer-ip>'}:9200/_cat/indices?v | grep wazuh-alerts
+   \`\`\`
+   應看到 \`green open wazuh-alerts-4.x-YYYY.MM.DD\`。
+
+4. **Dashboard 可連 Manager API**:登入 \`https://${data.dash[0] ? data.dash[0].ip : '<dashboard-ip>'}\`
+   後,左側選單「Agents」若能正常列出(即使目前只有 0 或少數幾台),代表 wazuh.yml 的 API 連線正確;
+   若整頁報連線錯誤,先檢查 wazuh.yml 內的位址/帳密。
+
+5. **NIDS 側錄有作用**:在任一台 NIDS 執行 \`curl http://testmyids.com\`,回到 Dashboard
+   的 Discover 應該幾秒內看到對應的 Suricata 告警事件。
+
+## 已知需要留意的地方(非官方手冊沒寫,是實務上容易踩到的坑)
+
+- Filebeat **一定要用 filebeat-oss**,裝到 elastic.co 官方版會撞 Elastic 授權檢查、ILM 把索引改名、
+  以及 Ubuntu 24.04(Kernel 6.8)Seccomp 崩潰,這三個都很難從表面錯誤訊息直接看出原因。
+- Dashboard 的 \`wazuh.yml\`(API 連線設定)常常被漏掉,漏了不會讓 Dashboard 起不來,
+  只會讓「Agents / 規則」等 Wazuh App 功能連不上,容易被誤判成別的問題。
+- NIDS 監聽介面編號因主機而異,不能寫死,務必依「## ${data.platform==='pve' ? '9' : '8'}. NIDS」段落現場確認。
+- 部署完成後,\`opensearch_admin_password\`(目前是 \`${data.opensearchPass}\`)與 Dashboard API 的
+  \`wazuh-wui\`/\`wazuh-wui\`(目前仍是官方預設值)都建議儘快透過 \`wazuh-passwords-tool.sh\` 更新為
+  正式密碼,不要長期沿用這裡產生的初始值。
 `;
 }
 
@@ -1774,7 +2559,10 @@ async function generatePackage(){
   }
   root.file('README.md', buildReadme(data.customerName, data.platform));
   root.file('HARDWARE_SPEC.md', buildSpecSummary(data));
+  root.file('SOP.md', buildSopManual(data));
 
+  root.folder('roles/common/tasks').file('main.yml', buildCommonRole());
+  root.folder('roles/certs_bootstrap/tasks').file('main.yml', buildCertsBootstrapRole());
   root.folder('roles/indexer/tasks').file('main.yml', buildIndexerRole());
   root.folder('roles/indexer/handlers').file('main.yml', buildHandlers('indexer'));
   root.folder('roles/indexer_security_init/tasks').file('main.yml', buildIndexerSecurityInitRole());
@@ -1792,7 +2580,7 @@ async function generatePackage(){
     root.file(path, content);
   });
 
-  root.folder('certs').file('README.txt', '請將 wazuh-certs-tool.sh 產生的憑證檔案放到這裡 (依 inventory 主機名稱命名)。\\n');
+  root.folder('certs').file('README.txt', '這個目錄留空即可 —— 執行 site.yml 時第一個 play (certs_bootstrap) 會自動在中央控制機本機下載並執行 wazuh-certs-tool.sh,依 inventory 主機名稱產生對應憑證並放進這裡。\\n若中央控制機連不到 packages.wazuh.com 導致自動產生失敗,可依照 SOP.md 內「4. SSL 憑證生成」章節手動產生,把 *.pem 檔放進這個目錄後重跑 site.yml,偵測到 root-ca.pem 已存在就會直接略過自動產生那段。\\n');
 
   try{
     const blob = await zip.generateAsync({type:'blob'});
