@@ -322,6 +322,14 @@
     <textarea id="previewBox" style="display:none; width:100%; height:260px; margin-top:12px;"></textarea>
   </div>
 
+  <div class="card">
+    <h2>把系統遷移到客戶正式網段 <span class="badge">選用,通用參考文件</span></h2>
+    <div class="hint">這是獨立於上面部署包之外的另一份文件:如果你先在測試網段(例如公司內部)把整套系統建好、驗證過,之後才要正式搬到客戶現場的網段,裡面有完整步驟,包含最重要的一條鐵律——批次切換腳本刻意排除 PVE 宿主機自己,宿主機 IP 只能在現場、接實體螢幕鍵盤時才手動改,避免遠端操作把自己唯一的管理通道切斷。內容是通用範例(不會帶入你上面填的實際主機資料),下載後把裡面的範例 IP 換成你的實際規劃即可。</div>
+    <div class="actions">
+      <button class="btn-ghost" onclick="downloadMigrationSop()">📄 下載遷移到客戶網段 SOP</button>
+    </div>
+  </div>
+
   <div class="footer-note">內部工具原型 · 產出內容執行前請先於測試環境驗證</div>
 </div>
 
@@ -2266,58 +2274,70 @@ sudo systemctl enable wazuh-dashboard
 sudo systemctl restart wazuh-dashboard
 \`\`\``).join('\n');
 
-  const nidsSection = data.nids.map(h=>`
-#### ${h.name} (${h.ip})${h.captureIface ? `,監聽介面 ${h.captureIface}` : '(監聽介面編號未預先填寫,依下方步驟現場判斷)'}
+  const nidsSection = data.nids.map(h=>{
+    const ifaceKnown = !!h.captureIface;
+    return `
+#### ${h.name} (${h.ip})${ifaceKnown ? `,監聽介面 ${h.captureIface}(你在網頁上已填寫,不用現場偵測)` : '(監聽介面編號未預先填寫,用下面腳本自動偵測)'}
 
-**若不確定監聽介面編號**,先登入這台主機用 \`ip a\` 看有哪些網卡,排除 \`lo\` 跟你正在用來 SSH 連線的
-那張(通常是有拿到 IP、預設路由在上面那張,例如 \`ens18\`),剩下沒配 IP 的那張(例如 \`ens19\`)
-就是接 mirror/SPAN 的那張。若 VM 只有一張網卡,代表交換器的 mirror port 還沒接、或這台 VM 還沒加
-第二張網卡連過去,兩者都要先跟網路╱機房那邊確認好,不能用猜的。
+${ifaceKnown ? `這台的監聽介面你已經在網頁上填好是 \`${h.captureIface}\`,下面指令直接複製貼上即可,不用先跑偵測。` : `**不用自己用眼睛看 \`ip a\` 比對**,跑下面這段自動偵測腳本,它會排除管理介面跟 \`lo\`,剩下「恰好一張」才自動採用;無法唯一判斷就會停下來列出候選,要你確認後手動指定,不會用猜的:
 
 \`\`\`bash
-ip -brief link show    # 找出候選介面,排除 lo 與管理用介面
+MGMT_IFACE=$(ip -4 route show default 2>/dev/null | awk '{print $5; exit}')
+CANDIDATES=$(ip -brief link show | awk -v m="$MGMT_IFACE" '$1!="lo" && $1!=m {print $1}')
+COUNT=$(echo "$CANDIDATES" | grep -c .)
+
+if [ "$COUNT" -eq 1 ]; then
+  MIRROR_IFACE="$CANDIDATES"
+  echo "✅ 自動偵測到監聽介面:$MIRROR_IFACE(管理介面是 $MGMT_IFACE)"
+else
+  echo "⚠️ 無法自動判斷監聽介面(候選:$CANDIDATES)"
+  echo "候選是空的:代表這台 VM 還沒加第二張接 vmbr1 的網卡,請先回 PVE 加好再重跑。"
+  echo "候選有兩個以上:請跟網路/機房確認哪張才是真的接 mirror/SPAN,再手動: MIRROR_IFACE=<介面名稱>"
+fi
 \`\`\`
+`}
 
-netplan 雙網卡設定 (\`/etc/netplan/01-netcfg.yaml\`,依實際偵測到的介面名稱替換 ens18/ens19):
+netplan 雙網卡設定:
 
-\`\`\`yaml
+\`\`\`bash
+${ifaceKnown ? `MGMT_IFACE=$(ip -4 route show default 2>/dev/null | awk '{print $5; exit}')
+MIRROR_IFACE="${h.captureIface}"
+` : ''}sudo tee /etc/netplan/01-netcfg.yaml > /dev/null <<EOF
 network:
   version: 2
   renderer: networkd
   ethernets:
-    ens18:
+    \${MGMT_IFACE}:
       addresses: [${h.ip}/${data.vipCidr}]
       routes: [{to: default, via: ${data.gateway || '<gateway>'}}]
       nameservers: {addresses: [${data.dnsServer || '8.8.8.8'}]}
-    ens19:            # 换成實際判斷出來的監聽介面
+    \${MIRROR_IFACE}:
       dhcp4: no
       dhcp6: no
       activation-mode: manual
-\`\`\`
-
-\`\`\`bash
+EOF
 sudo netplan apply
 \`\`\`
 
-開機常駐混雜模式(把 ens19 換成實際介面名稱):
+開機常駐混雜模式:
 
 \`\`\`bash
-sudo bash -c 'cat <<EOF > /etc/systemd/system/nids-mirror-promisc.service
+sudo tee /etc/systemd/system/nids-mirror-promisc.service > /dev/null <<EOF
 [Unit]
-Description=Set NIDS mirror port to promiscuous mode
+Description=Set NIDS mirror port \${MIRROR_IFACE} to promiscuous mode
 After=network.target
 
 [Service]
 Type=oneshot
-ExecStart=/sbin/ip link set dev ens19 up promisc on
+ExecStart=/sbin/ip link set dev \${MIRROR_IFACE} up promisc on
 RemainAfterExit=yes
 
 [Install]
 WantedBy=multi-user.target
-EOF'
+EOF
 sudo systemctl daemon-reload
 sudo systemctl enable --now nids-mirror-promisc.service
-ip link show ens19   # 輸出要有 PROMISC 標記
+ip link show "$MIRROR_IFACE"   # 輸出要有 PROMISC 標記
 \`\`\`
 
 安裝 Suricata(用 PPA 拿較新的穩定版,不要用 Ubuntu 內建套件庫的舊版):
@@ -2325,7 +2345,7 @@ ip link show ens19   # 輸出要有 PROMISC 標記
 \`\`\`bash
 sudo add-apt-repository ppa:oisf/suricata-stable -y
 sudo apt update && sudo apt install -y suricata jq
-sudo sed -i 's/interface: eth0/interface: ens19/g' /etc/suricata/suricata.yaml   # ens19 換成實際介面
+sudo sed -i "s/interface: eth0/interface: \${MIRROR_IFACE}/g" /etc/suricata/suricata.yaml
 sudo suricata-update
 sudo systemctl enable --now suricata
 \`\`\`
@@ -2352,7 +2372,15 @@ EOF'
 sudo /var/ossec/bin/agent-auth -m ${agentConnectAddress}
 
 sudo systemctl enable --now wazuh-agent
-\`\`\``).join('\n');
+\`\`\`
+
+**✅ 驗證這台成功:**
+
+\`\`\`bash
+sudo systemctl status wazuh-agent --no-pager
+ls -la /var/ossec/etc/client.keys
+\`\`\``;
+  }).join('\n');
 
   const lbSection = data.lb.length ? `
 LB 用 HAProxy(+ ${data.lb.length >= 2 ? 'Keepalived,因為有 ' + data.lb.length + ' 台需要 VIP 漂移' : '單台,不需要 Keepalived/VIP'}):
@@ -2369,14 +2397,28 @@ ${data.lb.length >= 2 ? `
 (priority 101),其餘為 BACKUP(priority 100),vrrp_router_id 51,認證密碼用叢集金鑰前 8 碼。` : ''}
 ` : '';
 
-  return `# Vista AI 叢集手動部署 SOP — ${data.customerName}
+  const b = data.platform==='pve' ? 4 : 3; // 「所有主機基礎環境設定」的章節號,後面章節都從這裡往下推算(0=開始之前,1=主機清單,2=系統架構,[3=PVE 前置作業])
 
-> 這份文件跟自動化的 \`site.yml\` 邏輯是同一套,差別只是手動一步步做。
+  return `# 叢集手動部署 SOP — ${data.customerName}
+
+> 這份文件跟自動化的 \`site.yml\` 邏輯是同一套,差別只是手動一步步做,而且已經帶入這次實際填寫的
+> 主機名稱、IP、密碼——**新手照著複製貼上就能做完**,不用另外去猜要換成什麼值。
 > **自動化正常跑完全部就不需要看這份**;只有在 \`./deploy.sh install\` 中途某個 play 卡住/失敗時,
 > 才需要接手從失敗的那個階段開始手動做完,或用來對照排查是哪個環節出問題。
 > 產生時間: ${new Date().toISOString()}
 
-## 0. 這次部署的主機清單
+## 0. 開始之前
+
+**帳號假設**:全程假設你沒有 root 密碼,只有一個有 \`sudo\` 權限的一般帳號——這次填的是 \`${data.sshUser}\`。
+所有指令都用 \`sudo\` 開頭,不要嘗試 \`ssh root@...\`(會被拒絕,這是正常的)。
+
+**鐵律**:PVE 宿主機自己的 IP 與 \`/etc/network/interfaces\`,絕對不要在遠端 SSH 連線的情況下用腳本修改——
+一旦執行,你賴以連線的路徑會被自己切斷。宿主機 IP 只能在人在現場、接實體螢幕鍵盤時才手動改。
+
+**建議做法**:下面每個角色**逐台登入、一步步做、每步都用附的驗證指令確認過再往下走**,不要跳步,
+也不要看到「應該成功了」就直接進下一步。
+
+## 1. 這次部署的主機清單
 
 ${hostsTable()}
 
@@ -2385,11 +2427,11 @@ ${hostsTable()}
 - OpenSearch/Dashboard admin 密碼: \`${data.opensearchPass}\`
 - Agent / Dashboard API 連線位址: \`${agentConnectAddress}\`${data.needsVip ? '(VIP,由 Keepalived 在 LB 間漂移)' : '(單台 LB 的 IP,沒有 VIP)'}
 
-## 1. 系統架構
+## 2. 系統架構
 
 管理/叢集資料流走同一網段;NIDS 另外接 mirror/SPAN 流量。${data.platform==='pve' ? '本次選擇 Proxmox VE,PVE 宿主機需準備管理橋接器 (vmbr0) 與側錄專用橋接器 (vmbr1)。' : data.platform==='vmware' ? '本次選擇 VMware vSphere,請參考 00-vmware-customize-notes.md 完成 Guest Customization。' : '本次選擇「其他平台/VM 已有 IP」,假設網路層已就緒。'}
 
-${data.platform==='pve' ? `## 2. PVE 宿主機前置作業
+${data.platform==='pve' ? `## 3. PVE 宿主機前置作業
 
 在 PVE 宿主機編輯 \`/etc/network/interfaces\`(範例,實際網卡名稱請依 \`ip a\` 確認):
 
@@ -2422,7 +2464,7 @@ ifreload -a
 VM 建立時:CPU 模式設 \`host\`;NIDS 那台除了接 vmbr0 的管理網卡,要**多加一張接 vmbr1** 的網卡
 (作為監聽口)。
 
-` : ''}## ${data.platform==='pve' ? '3' : '2'}. 所有主機基礎環境設定
+` : ''}## ${b}. 所有主機基礎環境設定
 
 在**全部 ${data.idx.length + data.mgr.length + data.dash.length + data.lb.length + data.nids.length} 台 VM** 上執行:
 
@@ -2442,7 +2484,7 @@ echo "vm.max_map_count=262144" | sudo tee -a /etc/sysctl.conf
 sudo sysctl -p
 \`\`\`
 
-## ${data.platform==='pve' ? '4' : '3'}. SSL 憑證生成(在中央控制機或任一台 Manager 執行一次即可)
+## ${b+1}. SSL 憑證生成(在中央控制機或任一台 Manager 執行一次即可)
 
 \`\`\`bash
 curl -sO https://packages.wazuh.com/4.x/wazuh-certs-tool.sh
@@ -2458,50 +2500,64 @@ ${certConfigYml}
 bash wazuh-certs-tool.sh -A
 \`\`\`
 
-產生的 \`<主機名稱>.pem\` / \`<主機名稱>-key.pem\` / \`root-ca.pem\` / \`admin.pem\` / \`admin-key.pem\`
-分別依主機名稱送到對應主機。
+**✅ 驗證:**\`ls -la *.pem\`,應該看到 \`root-ca.pem\`、\`admin.pem\`、\`admin-key.pem\`,以及每個節點各一組
+\`<主機名稱>.pem\`/\`<主機名稱>-key.pem\`。產生後把對應節點的檔案 \`scp\` 到各自主機(下面每節會說放哪個目錄)。
 
-## ${data.platform==='pve' ? '5' : '4'}. Wazuh Indexer 部署
+## ${b+2}. Wazuh Indexer 部署
 ${indexerSection}
 
-## ${data.platform==='pve' ? '6' : '5'}. Wazuh Manager 部署 + Filebeat OSS
+## ${b+3}. Wazuh Manager 部署 + Filebeat OSS
 ${managerSection}
 
-## ${data.platform==='pve' ? '7' : '6'}. Wazuh Dashboard 部署
+## ${b+4}. Wazuh Dashboard 部署
 ${dashboardSection}
 
-## ${data.platform==='pve' ? '8' : '7'}. 負載平衡 LB
+## ${b+5}. 負載平衡 LB
 ${lbSection || '本次未設定 LB。'}
 
-## ${data.platform==='pve' ? '9' : '8'}. NIDS(Suricata + Agent,鏡像埠側錄)
+## ${b+6}. NIDS(Suricata + Agent,鏡像埠側錄)
 ${nidsSection || '本次未設定 NIDS。'}
 
-## ${data.platform==='pve' ? '10' : '9'}. 部署驗證清單
+## ${b+7}. 歷史日誌保留策略(避免硬碟被日誌塞爆)
 
-1. **OpenSearch 節點狀態**(Dashboard → Indexer management → Dev Tools):
-   \`\`\`
-   GET /_cat/nodes?v
-   \`\`\`
-   應看到全部 ${data.idx.length} 台 Indexer,其中一台標記 cluster_manager \`*\`。
+預設 OpenSearch 索引永久保留,建議設定自動清理(以 90 天為例)。開啟 Dashboard → 主選單 →
+**Indexer management → Index Management → State management policies → Create policy**,選
+**JSON editor**,Policy ID 輸入 \`wazuh-alerts-retention-policy\`,貼上:
 
-2. **Manager 叢集狀態**(在 ${mgrMaster ? mgrMaster.name : 'Master'} 執行):
-   \`\`\`bash
-   sudo /var/ossec/bin/cluster_control -l
-   \`\`\`
-   應看到 ${data.mgr.map(m=>m.name).join('、')} 全部 Active。
+\`\`\`json
+{
+  "policy": {
+    "description": "Vista AI alerts 90-day retention and auto-delete policy",
+    "default_state": "hot",
+    "states": [
+      { "name": "hot", "actions": [], "transitions": [
+        { "state_name": "delete", "conditions": { "min_index_age": "90d" } }
+      ]},
+      { "name": "delete", "actions": [{ "delete": {} }], "transitions": [] }
+    ],
+    "ism_template": [{ "index_patterns": ["wazuh-alerts-4.x-*"], "priority": 100 }]
+  }
+}
+\`\`\`
 
-3. **索引已建立**:
-   \`\`\`bash
-   curl -s -k -u admin:${data.opensearchPass} https://${data.idx[0] ? data.idx[0].ip : '<indexer-ip>'}:9200/_cat/indices?v | grep wazuh-alerts
-   \`\`\`
-   應看到 \`green open wazuh-alerts-4.x-YYYY.MM.DD\`。
+點右下角 **Create**,之後每天新產生的索引都會自動套用,不用再手動設定。
 
-4. **Dashboard 可連 Manager API**:登入 \`https://${data.dash[0] ? data.dash[0].ip : '<dashboard-ip>'}\`
-   後,左側選單「Agents」若能正常列出(即使目前只有 0 或少數幾台),代表 wazuh.yml 的 API 連線正確;
-   若整頁報連線錯誤,先檢查 wazuh.yml 內的位址/帳密。
+## ${b+8}. 全系統健康檢查總表(部署完直接照跑一輪)
 
-5. **NIDS 側錄有作用**:在任一台 NIDS 執行 \`curl http://testmyids.com\`,回到 Dashboard
-   的 Discover 應該幾秒內看到對應的 Suricata 告警事件。
+| # | 檢查項目 | 指令(在哪台執行) | 合格標準 |
+|---|---|---|---|
+| 1 | Indexer 叢集狀態 | \`curl -s -k -u admin:${data.opensearchPass} https://${data.idx[0] ? data.idx[0].ip : '<indexer-ip>'}:9200/_cat/nodes?v\`(任一 Indexer) | 列出 ${data.idx.length} 台,一台標記 \`*\`(Master) |
+| 2 | Indexer 叢集健康度 | \`curl -s -k -u admin:${data.opensearchPass} https://${data.idx[0] ? data.idx[0].ip : '<indexer-ip>'}:9200/_cluster/health?pretty\`(同上) | \`"status": "green"\` |
+| 3 | Manager 叢集狀態 | \`sudo /var/ossec/bin/cluster_control -l\`(${mgrMaster ? mgrMaster.name : 'Master'}) | ${data.mgr.map(m=>m.name).join('、')} 全部 \`Active\` |
+| 4 | Filebeat 服務 | \`sudo systemctl status filebeat --no-pager\`(每台 Manager) | \`active (running)\`,沒有一直重啟 |
+| 5 | 實體索引已建立 | \`curl -s -k -u admin:${data.opensearchPass} https://${data.idx[0] ? data.idx[0].ip : '<indexer-ip>'}:9200/_cat/indices?v \\| grep wazuh-alerts\`(任一 Manager) | 看到 \`green open wazuh-alerts-4.x-*\` |
+| 6 | Dashboard 可連線 | \`curl -k -s -o /dev/null -w "%{http_code}\\n" https://${data.dash[0] ? data.dash[0].ip : '<dashboard-ip>'}\` | 回傳 \`200\` |
+| 7 | Dashboard 連得到 Manager API | 瀏覽器登入 \`https://${data.dash[0] ? data.dash[0].ip : '<dashboard-ip>'}\` 後看「Agents」頁 | 能正常顯示(即使是 0 台) |
+${data.nids.length ? `| 8 | NIDS 監聽介面混雜模式 | \`ip link show "$MIRROR_IFACE"\`(NIDS) | 輸出含 \`PROMISC\` |
+| 9 | NIDS Agent 已註冊 | \`ls -la /var/ossec/etc/client.keys\`(NIDS) | 檔案存在有內容 |
+| 10 | 端對端告警串流 | NIDS 上跑 \`curl http://testmyids.com\`,回 Dashboard Discover 看 | 幾秒內出現對應事件 |
+` : ''}${data.lb.length >= 2 ? `| 11 | LB/VIP 高可用 | \`ip addr show <網卡> \\| grep ${data.vip}\`(${data.lb[0].name}),停該台 haproxy 後在另一台看同指令 | VIP 會在故障時自動漂移到另一台 |
+` : ''}
 
 ## 已知需要留意的地方(非官方手冊沒寫,是實務上容易踩到的坑)
 
@@ -2509,7 +2565,8 @@ ${nidsSection || '本次未設定 NIDS。'}
   以及 Ubuntu 24.04(Kernel 6.8)Seccomp 崩潰,這三個都很難從表面錯誤訊息直接看出原因。
 - Dashboard 的 \`wazuh.yml\`(API 連線設定)常常被漏掉,漏了不會讓 Dashboard 起不來,
   只會讓「Agents / 規則」等 Wazuh App 功能連不上,容易被誤判成別的問題。
-- NIDS 監聽介面編號因主機而異,不能寫死,務必依「## ${data.platform==='pve' ? '9' : '8'}. NIDS」段落現場確認。
+- NIDS 監聽介面編號因主機而異,不能寫死,務必依「## ${b+6}. NIDS」段落的自動偵測腳本現場確認,不要用猜的。
+- 批次腳本(尤其之後若改用 Ansible/自動化)每次改動前,務必對照第 1 節的完整主機清單,確認目標涵蓋所有節點——漏掉 LB/VIP 這類容易被忽略的輔助元件,是最常見的踩坑之一。
 - 部署完成後,\`opensearch_admin_password\`(目前是 \`${data.opensearchPass}\`)與 Dashboard API 的
   \`wazuh-wui\`/\`wazuh-wui\`(目前仍是官方預設值)都建議儘快透過 \`wazuh-passwords-tool.sh\` 更新為
   正式密碼,不要長期沿用這裡產生的初始值。
@@ -2572,6 +2629,194 @@ function previewSop(){
     return;
   }
   box.value = buildSopManual(data);
+}
+
+function buildMigrationSop(){
+  return `# 把叢集從測試網段遷移到客戶正式網段
+
+> 情境:你先在測試網段(範例 \`10.9.55.x\`)把整套系統建好、驗證過都合格,現在要正式搬到客戶提供的網段(範例 \`192.168.168.x\`)。這是通用範例文件,下載後把裡面的 IP、帳號換成你的實際規劃即可。
+
+## 唯一、也是最重要的鐵律
+
+下面所有批次腳本的目標清單,**故意不包含 PVE 宿主機自己**。PVE 宿主機 IP 的切換被拆到最後一步獨立處理,**只能在現場、接實體螢幕鍵盤時才執行**——如果透過 SSH 連進宿主機、腳本裡又包含「改宿主機自己 IP 並重新載入網路設定」這種指令,一旦執行,你當下的 SSH 連線本身就會被切斷,因為你賴以連線的那條路徑被自己改掉了。
+
+帳號假設:全程假設你沒有 root 密碼,只有一個有 \`sudo\` 權限的一般帳號(下面用 \`<SSH帳號>\` 代稱,換成你實際帳號)。
+
+## 1. 遷移前:先疊加新網段的臨時 IP 測試連通(不影響現有服務)
+
+在 PVE 宿主機上,先在管理橋接器疊加一個新網段的臨時 IP(**只存在於記憶體,不寫入設定檔,重開機會自動消失,不影響現有連線**),確認新網段實際能通再往下做:
+
+\`\`\`bash
+sudo ip addr add 192.168.168.250/24 dev vmbr0
+ping -c 3 192.168.168.253   # 客戶 Gateway
+ping -c 3 192.1.1.6         # 客戶 DNS
+\`\`\`
+
+- **能通**:代表新網段的實體線路已經備妥,可以繼續往下做正式切換
+- **不通**:先別往下做,回頭跟客戶/現場網路人員確認新網段是否真的已經接通,不要用「應該通」去猜
+
+測試完可以順手移除這個臨時 IP:
+
+\`\`\`bash
+sudo ip addr del 192.168.168.250/24 dev vmbr0
+\`\`\`
+
+## 2. 建立 PVE 宿主機到各 VM 的 SSH 免密碼信任(對 \`<SSH帳號>\`,不對 root)
+
+\`\`\`bash
+[ -f ~/.ssh/id_rsa ] || ssh-keygen -t rsa -N "" -f ~/.ssh/id_rsa
+
+# 下面清單請填入全部「VM」的舊 IP(不含 PVE 宿主機自己)
+for ip in 10.9.55.82 10.9.55.83 10.9.55.84 10.9.55.85 10.9.55.86 10.9.55.87 10.9.55.91 10.9.55.92; do
+  ssh-copy-id -o StrictHostKeyChecking=no <SSH帳號>@$ip
+done
+\`\`\`
+
+**✅ 驗證:**
+
+\`\`\`bash
+for ip in 10.9.55.82 10.9.55.83 10.9.55.84 10.9.55.85 10.9.55.86 10.9.55.87 10.9.55.91 10.9.55.92; do
+  ssh <SSH帳號>@$ip "hostname"
+done
+# 全部都要能直接印出主機名稱,不會再被要求輸入密碼
+\`\`\`
+
+## 3. 重新產生新網段的 TLS 憑證
+
+跟初始部署做法一樣,只是 \`config.yml\` 裡的 IP 全部換成客戶網段:
+
+\`\`\`bash
+cd ~
+rm -rf wazuh-certificates* config.yml
+cat <<EOF > config.yml
+nodes:
+  indexer:
+    - name: Vista-Indexer1
+      ip: 192.168.168.135
+    - name: Vista-Indexer2
+      ip: 192.168.168.136
+    - name: Vista-Indexer3
+      ip: 192.168.168.137
+  server:
+    - name: Vista-Manager
+      ip: 192.168.168.132
+    - name: Vista-Worker1
+      ip: 192.168.168.133
+    - name: Vista-Worker2
+      ip: 192.168.168.134
+  dashboard:
+    - name: Vista-Dashboard
+      ip: 192.168.168.141
+EOF
+bash wazuh-certs-tool.sh -A
+\`\`\`
+
+## 4. 批次更新所有 VM 的設定檔(⚠️這份清單不含 PVE 宿主機)
+
+在 PVE 宿主機上,用「新舊 IP 對照表」批次把每台 VM 內部的設定檔改成新 IP:
+
+\`\`\`bash
+declare -A OLD2NEW=(
+  ["10.9.55.82"]="192.168.168.132"
+  ["10.9.55.83"]="192.168.168.133"
+  ["10.9.55.84"]="192.168.168.134"
+  ["10.9.55.85"]="192.168.168.135"
+  ["10.9.55.86"]="192.168.168.136"
+  ["10.9.55.87"]="192.168.168.137"
+  ["10.9.55.91"]="192.168.168.141"
+  ["10.9.55.92"]="192.168.168.142"
+)
+
+# Indexer:憑證 + opensearch.yml
+for old_ip in 10.9.55.85 10.9.55.86 10.9.55.87; do
+  new_ip="\${OLD2NEW[$old_ip]}"
+  ssh <SSH帳號>@"$old_ip" "sudo sed -i \\"s/$old_ip/$new_ip/g\\" /etc/wazuh-indexer/opensearch.yml"
+done
+
+# Manager:ossec.conf 的 Master IP + filebeat.yml 的輸出位址
+for old_ip in 10.9.55.82 10.9.55.83 10.9.55.84; do
+  ssh <SSH帳號>@"$old_ip" "sudo sed -i \\"s/10.9.55.82/\${OLD2NEW[10.9.55.82]}/g\\" /var/ossec/etc/ossec.conf /etc/filebeat/filebeat.yml"
+done
+
+# Dashboard:兩個設定檔都要改
+ssh <SSH帳號>@10.9.55.91 "sudo sed -i \\"s/10.9.55.85/\${OLD2NEW[10.9.55.85]}/g; s/10.9.55.86/\${OLD2NEW[10.9.55.86]}/g; s/10.9.55.87/\${OLD2NEW[10.9.55.87]}/g\\" /etc/wazuh-dashboard/opensearch_dashboards.yml"
+ssh <SSH帳號>@10.9.55.91 "sudo sed -i \\"s/10.9.55.82/\${OLD2NEW[10.9.55.82]}/g\\" /usr/share/wazuh-dashboard/data/wazuh/config/wazuh.yml"
+
+# NIDS/Agent
+ssh <SSH帳號>@10.9.55.92 "sudo sed -i \\"s/10.9.55.82/\${OLD2NEW[10.9.55.82]}/g\\" /var/ossec/etc/ossec.conf"
+\`\`\`
+
+> 若有部署 LB/VIP,記得把 \`/etc/keepalived/keepalived.conf\` 跟 \`/etc/haproxy/haproxy.cfg\` 也一併納入。**批次腳本最容易出的錯就是「目標清單漏節點」**,每跑完一台建議用 \`ssh <SSH帳號>@<IP> "cat <該設定檔>"\` 檢查內容有沒有真的換成新 IP,不要整段貼完就假設成功。
+
+## 5. 批次切換所有 VM 的 Netplan IP(⚠️同樣不含 PVE 宿主機)
+
+\`\`\`bash
+for old_ip in "\${!OLD2NEW[@]}"; do
+  new_ip="\${OLD2NEW[$old_ip]}"
+  ssh <SSH帳號>@"$old_ip" "MGMT_IFACE=\\$(ip -4 route show default | awk '{print \\$5; exit}'); sudo tee /etc/netplan/01-netcfg.yaml > /dev/null <<EOF
+network:
+  version: 2
+  renderer: networkd
+  ethernets:
+    \\$MGMT_IFACE:
+      addresses: [${'$'}{new_ip}/24]
+      routes: [{to: default, via: 192.168.168.253}]
+      nameservers: {addresses: [192.1.1.6]}
+EOF
+sudo nohup netplan apply > /tmp/netplan-apply.log 2>&1 &"
+done
+\`\`\`
+
+> 用 \`nohup ... &\` 背景執行 \`netplan apply\` 是刻意的——網卡切換的瞬間,SSH 連線本身可能會卡住等到逾時,背景執行可以避免整個腳本卡住不動。
+
+## 6. 驗證所有 VM 已經切換成功
+
+\`\`\`bash
+for new_ip in "\${OLD2NEW[@]}"; do
+  ping -c 1 -W 1 "$new_ip" >/dev/null 2>&1 && echo "$new_ip: 連線正常" || echo "$new_ip: 尚未回應,請檢查"
+done
+\`\`\`
+
+全部 VM 都顯示「連線正常」後,再跑一輪部署 SOP 裡的「全系統健康檢查總表」,確認叢集功能(不只是網路)也正常。
+
+## 7. 最後,也只有這一步,才輪到 PVE 宿主機自己(必須現場執行)
+
+**這步不能遠端做。** 等到設備已經搬到客戶現場、實體網路線已經接上客戶交換器,由現場人員直接在 PVE 的實體螢幕鍵盤(或機房 KVM)前操作:
+
+\`\`\`bash
+sudo nano /etc/network/interfaces
+# 把 vmbr0 的 address 改成客戶給的宿主機 IP,gateway 改成客戶的 gateway
+sudo ifreload -a
+\`\`\`
+
+**✅ 驗證這步成功:**
+
+\`\`\`bash
+ip -brief addr show vmbr0
+\`\`\`
+
+再用瀏覽器開 \`https://<PVE 新 IP>:8006\` 確認能連進 PVE 管理介面。到這裡,整個從測試網段搬到客戶網段的遷移才算完成。
+
+## 常見錯誤
+
+| 錯誤現象 | 根本原因 | 解法 |
+|---|---|---|
+| 遠端操作到一半整個斷線,再也連不上宿主機 | 腳本包含「修改宿主機自己 IP 並重新載入網路」這種指令,在遠端 SSH 連線下執行會切斷自己 | 宿主機 IP 只能在人在現場、接實體 Console 時才手動改;遠端維運腳本絕對不要碰宿主機自己的網卡設定 |
+| 批次切換多台 IP 的腳本「跑完了」但部分服務還是連著舊 IP | 腳本裡的目標清單漏掉了某些節點(常見漏掉 LB/VIP 這類容易被忽略的輔助元件) | 每次改批次腳本前,先對照完整架構表,確認清單涵蓋所有節點 |
+| Keepalived 重開機後 VIP 又跑回舊 IP | \`keepalived.conf\` 裡的舊 IP 沒改乾淨,VRRP 每次啟動都會照設定檔內容搶佔 | 直接檢查並修正 \`/etc/keepalived/keepalived.conf\` 裡的 \`virtual_ipaddress\`,不是重開機就會自動更新 |
+`;
+}
+
+function downloadMigrationSop(){
+  const blob = new Blob([buildMigrationSop()], {type: 'text/markdown;charset=utf-8'});
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = '遷移到客戶網段SOP.md';
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  URL.revokeObjectURL(url);
 }
 
 function copyCred(id){
