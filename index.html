@@ -124,8 +124,18 @@
         <div class="hint" id="platformHint"></div>
       </div>
     </div>
+    <div class="row">
+      <div class="field">
+        <label style="display:flex; align-items:center; gap:8px; cursor:pointer;">
+          <input type="checkbox" id="allInOneToggle" style="width:auto;" onchange="onAllInOneChange()">
+          本次為 All-in-One 單機建置(取代下方多角色叢集設定,不是額外附加)
+        </label>
+        <div class="hint">勾選後,下方「設備數量統計 ~ NIDS 詳細資料」整組多角色叢集表單會收起來,改成顯示 All-in-One 專用的單機欄位;產生的 zip 也會是精簡版(只有官方 <code>wazuh-install.sh -a</code> 安裝腳本 + 說明,不會有 inventory.yml / site.yml / roles 那一整套多角色叢集內容)。All-in-One 沒有 HA、無法擴充,僅建議用於測試/POC;要正式量產請取消勾選,走下方完整多角色叢集架構。</div>
+      </div>
+    </div>
   </div>
 
+  <div id="clusterCards">
   <div class="card">
     <h2>設備數量統計 <span class="badge">先填數量,下方會自動產生對應的填寫表</span></h2>
     <div class="hint" style="margin-bottom:12px;">依照本次客戶規模填入各角色設備數量,下方詳細填寫區塊會自動依數量展開。VIP 只有在 LB ≥ 2 台(需要做 MASTER/BACKUP 漂移)時才需要,若 LB 只有 1 台則不需要 VIP。</div>
@@ -253,10 +263,36 @@
     <div class="hint" style="margin-bottom:10px;">NIDS 需要接收交換器的 mirror/SPAN port 流量才有作用,每台可填「監聽介面」名稱;不確定編號可留空,部署時會自動偵測(僅一張非管理網卡時才會自動採用,否則會中止並提示手動指定)。</div>
     <div id="nidsHosts"></div>
   </div>
+  </div>
+
+  <div class="card" id="allInOneCard" style="display:none;">
+    <h2>All-in-One 單機建置資訊 <span class="badge">取代上面整組多角色叢集表單</span></h2>
+    <div class="hint" style="margin-bottom:12px;">All-in-One 是官方 <code>wazuh-install.sh -a</code> 的單機安裝路徑,把 Indexer + Manager + Dashboard 全部裝在同一台,沒有 HA、無法擴充,只建議用於 POC / Demo / 資源有限環境。</div>
+    <div class="row">
+      <div class="field">
+        <label>主機名稱</label>
+        <input type="text" id="allInOneHostname" placeholder="例如 Vista-AIO" value="Vista-AllInOne">
+      </div>
+      <div class="field">
+        <label>IP 位址</label>
+        <input type="text" id="allInOneIp" placeholder="例如 192.168.168.150">
+      </div>
+    </div>
+    <div class="row">
+      <div class="field">
+        <label>PVE VM ID(選填,僅在虛擬化平台選 Proxmox VE 且要用模式 A 離線磁碟注入 IP/SSH 金鑰時需要)</label>
+        <input type="text" id="allInOneVmid" placeholder="例如 150">
+      </div>
+      <div class="field">
+        <label>建議規格</label>
+        <div class="hint" style="margin-top:8px;">4 vCPU / 8GB RAM 起(僅供測試;正式量產環境請取消勾選 All-in-One,改用上面的多角色叢集架構)。</div>
+      </div>
+    </div>
+  </div>
 
   <div class="card">
     <h2>產生設定包</h2>
-    <div class="hint">會產出:inventory.yml、group_vars/all.yml、site.yml(主 playbook,含自動產生憑證)、roles 內各角色 tasks、verify.yml(驗收腳本)、deploy.sh(一鍵執行入口)、README.md、SOP.md(自動化卡住時可接手的完整手動部署手冊)。全部打包成一個 zip。</div>
+    <div class="hint" id="generatePackageHint">會產出:inventory.yml、group_vars/all.yml、site.yml(主 playbook,含自動產生憑證)、roles 內各角色 tasks、verify.yml(驗收腳本)、deploy.sh(一鍵執行入口)、README.md、SOP.md(自動化卡住時可接手的完整手動部署手冊)。全部打包成一個 zip。</div>
 
     <div style="background:var(--panel2); border:1px solid var(--border); border-radius:8px; padding:14px 16px; margin:12px 0;">
       <div style="font-weight:700; font-size:13px; margin-bottom:10px;">📦 這包下載下來怎麼用</div>
@@ -363,6 +399,7 @@ function renderHostGroup(role){
     datadisk: b.querySelector('.datadisk-input')?.value || '',
     datadiskUnit: b.querySelector('.datadisk-unit')?.value || '',
     captureIface: b.querySelector('.captureiface-input')?.value || '',
+    suricataKey: b.querySelector('.suricatakey-input')?.value || '',
   }));
 
   let html = '';
@@ -387,6 +424,10 @@ function renderHostGroup(role){
         ${role==='nids' ? `<div style="margin-top:6px;">
           <input type="text" class="captureiface-input" placeholder="監聽介面(mirror port)名稱,例如 ens19,留空則部署時自動偵測" value="${e.captureIface||''}">
           <span class="u" style="display:block;margin-top:2px;">接收 SPAN/mirror 流量的網卡。不確定編號可留空:部署時會自動排除管理網卡與 lo,若剩下「恰好一張」網卡就自動採用;若無法唯一判斷會直接中止並列出偵測到的介面,要求手動指定,不會用猜的。</span>
+        </div>
+        <div style="margin-top:6px;">
+          <input type="text" class="suricatakey-input" placeholder="Suricata 規則庫訂閱 Key(選填,例如 Emerging Threats Pro / 商業規則庫授權碼)" value="${e.suricataKey||''}">
+          <span class="u" style="display:block;margin-top:2px;">選填。留空則只用 suricata-update 預設的免費開源規則來源;若有付費規則庫(如 ET Pro)訂閱 key,填入後會寫入 SOP 與部署腳本的 suricata-update 設定,並在下載後的登入資訊區塊提醒你留存。</span>
         </div>` : ''}
         <div class="spec-row" style="grid-template-columns:1fr 1fr 1fr 1fr;">
           <div>
@@ -532,6 +573,21 @@ function updateResourceSummary(){
   document.getElementById('rsTotalDataDisk').textContent = formatSize(totalData);
 }
 
+function onAllInOneChange(){
+  const on = document.getElementById('allInOneToggle').checked;
+  document.getElementById('clusterCards').style.display = on ? 'none' : '';
+  document.getElementById('allInOneCard').style.display = on ? '' : 'none';
+  const genHint = document.getElementById('generatePackageHint');
+  if(genHint){
+    genHint.textContent = on
+      ? '目前是 All-in-One 模式:會產出精簡版 zip,只有 all-in-one-install.sh(官方 wazuh-install.sh -a)、README.md,以及(若平台選 PVE)對應的離線磁碟注入腳本。不會有 inventory.yml / site.yml / roles 那一整套多角色叢集內容。'
+      : '會產出:inventory.yml、group_vars/all.yml、site.yml(主 playbook,含自動產生憑證)、roles 內各角色 tasks、verify.yml(驗收腳本)、deploy.sh(一鍵執行入口)、README.md、SOP.md(自動化卡住時可接手的完整手動部署手冊)。全部打包成一個 zip。';
+  }
+  const status = document.getElementById('status');
+  if(status){ status.className = ''; status.textContent = ''; }
+  document.getElementById('previewBox').style.display = 'none';
+}
+
 function onPlatformChange(){
   const platform = document.getElementById('hvPlatform').value;
   const hint = document.getElementById('platformHint');
@@ -607,7 +663,8 @@ function collectHosts(role){
     const osdisk = toGB(osdiskRaw, osdiskUnit);
     const datadisk = toGB(datadiskRaw, datadiskUnit);
     const captureIface = b.querySelector('.captureiface-input')?.value.trim() || '';
-    if(name && ip) hosts.push({name, ip, vmid, cpu, ram, osdisk, datadisk, osdiskRaw, osdiskUnit, datadiskRaw, datadiskUnit, captureIface});
+    const suricataKey = b.querySelector('.suricatakey-input')?.value.trim() || '';
+    if(name && ip) hosts.push({name, ip, vmid, cpu, ram, osdisk, datadisk, osdiskRaw, osdiskUnit, datadiskRaw, datadiskUnit, captureIface, suricataKey});
   });
   return hosts;
 }
@@ -2043,6 +2100,473 @@ SOP.md                  # 完整手動部署手冊 (自動化卡住時的備援,
 `;
 }
 
+// ============================================================
+// 模式 A:PVE 宿主機「離線磁碟注入」腳本組
+// 對應情境:VM 尚未開機 / 未裝 QEMU Guest Agent 時的救援手段。
+// 直接 qm stop -> kpartx 掛載虛擬硬碟 -> 寫檔 -> 卸載 -> qm start,
+// 全程不需要 SSH 連進 VM、不需要 VM 網路已通。
+// 假設:VM 的系統模板已經預先安裝好對應套件(wazuh-indexer / wazuh-manager /
+// wazuh-dashboard / haproxy+keepalived),磁碟注入只負責覆寫設定檔,不負責裝套件。
+// ============================================================
+
+function pveDiskHelperBlock(){
+  return `# --- 共用函式:掛載/卸載 PVE 虛擬硬碟(離線磁碟注入用) ---
+pve_mount_vm(){
+  local VMID="$1"
+  echo "=== [VMID $VMID] 停機並掛載磁碟 ==="
+  qm stop "$VMID"
+  while qm status "$VMID" | grep -q running; do sleep 1; done
+  mkdir -p /mnt/pve_mount
+  DISK=$(pvesm path $(qm config "$VMID" | grep -E 'scsi0|sata0|virtio0|ide0' | awk '{print $2}' | cut -d',' -f1))
+  kpartx -av "$DISK" >/dev/null 2>&1 && sleep 1
+  PART=$(ls /dev/mapper/*"\${VMID}"*p1 /dev/mapper/*"\${VMID}"*1 /dev/mapper/pve-vm--"\${VMID}"--disk--0* 2>/dev/null | tail -n 1)
+  mount "$PART" /mnt/pve_mount
+  echo "$DISK" > /tmp/.pve_mount_disk_\${VMID}
+}
+pve_unmount_vm(){
+  local VMID="$1"
+  local DISK
+  DISK=$(cat /tmp/.pve_mount_disk_\${VMID} 2>/dev/null)
+  umount /mnt/pve_mount 2>/dev/null
+  [ -n "$DISK" ] && kpartx -dv "$DISK" >/dev/null 2>&1
+  rm -f /tmp/.pve_mount_disk_\${VMID}
+  qm start "$VMID"
+  echo "=== [VMID $VMID] 已寫入設定並重新開機 ==="
+}
+`;
+}
+
+function vmidWarn(host){
+  return host.vmid ? '' : `# ⚠️ ${host.name}(${host.ip})尚未填寫 PVE VM ID,下面這段請先手動把 VMID=?? 換成正確數字再執行\n`;
+}
+
+// 01. SSH 公鑰注入(對「模式 A」:離線寫入 authorized_keys)
+function buildInjectSshKeyScript(data){
+  const allHosts = [...data.idx, ...data.mgr, ...data.dash, ...data.lb, ...data.nids];
+  const body = allHosts.map(h => `${vmidWarn(h)}VMID=${h.vmid || '??'}   # ${h.name} (${h.ip})
+pve_mount_vm "$VMID"
+mkdir -p /mnt/pve_mount/home/${data.sshUser}/.ssh
+echo "$PUB_KEY" >> /mnt/pve_mount/home/${data.sshUser}/.ssh/authorized_keys
+chown -R 1000:1000 /mnt/pve_mount/home/${data.sshUser}/.ssh
+chmod 700 /mnt/pve_mount/home/${data.sshUser}/.ssh
+chmod 600 /mnt/pve_mount/home/${data.sshUser}/.ssh/authorized_keys
+pve_unmount_vm "$VMID"
+`).join('\n');
+
+  return `#!/bin/bash
+# 01-inject-sshkey.sh —— 模式 A:PVE 宿主機離線批次注入 SSH 公鑰
+# 用途:在完全不需要 VM 開機、不需要 VM 網路已通的情況下,
+#      把「本機(PVE 宿主機)」的 SSH 公鑰塞進每台 VM 的 ${data.sshUser} 帳號,
+#      之後就能對這些 VM 做 SSH 免密碼登入(給後續 Ansible / 模式 B 手動操作用)。
+# 執行位置:PVE 宿主機 (root@pve-airasia),不是中央控制機。
+set -e
+
+${pveDiskHelperBlock()}
+# 取得 PVE 宿主機自己的公鑰,沒有的話先產生一組
+[ -f /root/.ssh/id_rsa.pub ] || ssh-keygen -t rsa -N "" -f /root/.ssh/id_rsa
+PUB_KEY=$(cat /root/.ssh/id_rsa.pub 2>/dev/null || cat /root/.ssh/id_ed25519.pub)
+
+${body}
+echo "全部主機 SSH 公鑰注入完成。"
+`;
+}
+
+// 02. Indexer opensearch.yml 離線注入
+function buildInjectIndexerScript(data){
+  const seedHosts = data.idx.map(h => `    - "${h.ip}"`).join('\n');
+  const masterNodes = data.idx.map(h => `    - "${h.name}"`).join('\n');
+  const body = data.idx.map(h => `${vmidWarn(h)}VMID=${h.vmid || '??'}   # ${h.name} (${h.ip})
+pve_mount_vm "$VMID"
+cat <<'EOF' > /mnt/pve_mount/etc/wazuh-indexer/opensearch.yml
+cluster.name: "wazuh-cluster"
+node.name: "${h.name}"
+node.roles: ["master", "data"]
+network.host: ${h.ip}
+http.port: 9200
+transport.port: 9300
+discovery.seed_hosts:
+${seedHosts}
+cluster.initial_master_nodes:
+${masterNodes}
+plugins.security.ssl.transport.pemcert_filepath: /etc/wazuh-indexer/certs/${h.name}.pem
+plugins.security.ssl.transport.pemkey_filepath: /etc/wazuh-indexer/certs/${h.name}-key.pem
+plugins.security.ssl.transport.pemtrustedcas_filepath: /etc/wazuh-indexer/certs/root-ca.pem
+plugins.security.ssl.transport.enforce_hostname_verification: false
+plugins.security.ssl.http.enabled: true
+plugins.security.ssl.http.pemcert_filepath: /etc/wazuh-indexer/certs/${h.name}.pem
+plugins.security.ssl.http.pemkey_filepath: /etc/wazuh-indexer/certs/${h.name}-key.pem
+plugins.security.ssl.http.pemtrustedcas_filepath: /etc/wazuh-indexer/certs/root-ca.pem
+plugins.security.authcz.admin_dn:
+  - "CN=admin,OU=Wazuh,O=Wazuh,L=California,C=US"
+EOF
+grep -q "vm.max_map_count" /mnt/pve_mount/etc/sysctl.conf || echo "vm.max_map_count=262144" >> /mnt/pve_mount/etc/sysctl.conf
+pve_unmount_vm "$VMID"
+`).join('\n');
+
+  return `#!/bin/bash
+# 02-inject-indexer.sh —— 模式 A:PVE 宿主機離線注入 Indexer 設定
+# 前提:VM 磁碟模板內已預先裝好 wazuh-indexer 套件,這支只負責覆寫 opensearch.yml + sysctl。
+# 憑證檔(*.pem)需另外用 scp / 磁碟注入方式放進 /etc/wazuh-indexer/certs/,此腳本不含這段。
+set -e
+
+${pveDiskHelperBlock()}
+${body}
+echo "全部 Indexer 節點設定注入完成。"
+`;
+}
+
+// 03. Manager ossec.conf cluster 區塊離線注入
+function buildInjectManagerScript(data){
+  const master = data.mgr[0];
+  const body = data.mgr.map((h,i) => `${vmidWarn(h)}VMID=${h.vmid || '??'}   # ${h.name} (${h.ip})
+pve_mount_vm "$VMID"
+cat <<'EOF' > /mnt/pve_mount/var/ossec/etc/ossec.conf.cluster-block
+<ossec_config>
+  <cluster>
+    <name>wazuh-ha-cluster</name>
+    <node_name>${h.name}</node_name>
+    <node_type>${i===0?'master':'worker'}</node_type>
+    <key>${data.clusterKey}</key>
+    <interval>10m</interval>
+    <port>1516</port>
+    <bind_addr>0.0.0.0</bind_addr>
+    <nodes>
+      <node>${master.ip}</node>
+    </nodes>
+    <hidden>no</hidden>
+    <disabled>no</disabled>
+  </cluster>
+</ossec_config>
+EOF
+# 注意:上面先寫成獨立檔案 ossec.conf.cluster-block,是因為 ossec.conf 其餘內容(規則、解碼器等)
+# 由套件安裝時已經產生,直接整檔覆寫會把那些設定砍掉。實際做法:
+# 用 python3 -c 的簡易 XML 插入,把 <cluster>...</cluster> 區塊塞進既有 ossec.conf 的 <ossec_config> 內、
+# 或人工開檔手動貼上(見 SOP.md 模式 A 段落說明),不建議直接 mv 覆蓋整個 ossec.conf。
+pve_unmount_vm "$VMID"
+`).join('\n');
+
+  return `#!/bin/bash
+# 03-inject-manager.sh —— 模式 A:PVE 宿主機離線注入 Manager <cluster> 設定區塊
+# 前提:VM 磁碟模板內已預先裝好 wazuh-manager 套件。
+# ⚠️ 這支腳本只產生 <cluster> 區塊到 ossec.conf.cluster-block,不會自動合併進 ossec.conf,
+#    避免覆蓋掉套件安裝時已產生的其餘規則/解碼器設定。合併方式請見 SOP.md 對應章節。
+set -e
+
+${pveDiskHelperBlock()}
+${body}
+echo "全部 Manager 節點 cluster 區塊注入完成(尚待合併進 ossec.conf,見 SOP.md)。"
+`;
+}
+
+// 04. Dashboard opensearch_dashboards.yml 離線注入
+function buildInjectDashboardScript(data){
+  const hosts = data.idx.map(h=>`\\"https://${h.ip}:9200\\"`).join(', ');
+  const body = data.dash.map(h => `${vmidWarn(h)}VMID=${h.vmid || '??'}   # ${h.name} (${h.ip})
+pve_mount_vm "$VMID"
+cat <<EOF > /mnt/pve_mount/etc/wazuh-dashboard/opensearch_dashboards.yml
+server.port: 443
+server.host: "0.0.0.0"
+opensearch.hosts: [${hosts}]
+opensearch.ssl.verificationMode: none
+opensearch.username: "admin"
+opensearch.password: "${data.opensearchPass}"
+EOF
+pve_unmount_vm "$VMID"
+`).join('\n');
+
+  return `#!/bin/bash
+# 04-inject-dashboard.sh —— 模式 A:PVE 宿主機離線注入 Dashboard 設定
+# 前提:VM 磁碟模板內已預先裝好 wazuh-dashboard 套件。
+set -e
+
+${pveDiskHelperBlock()}
+${body}
+echo "全部 Dashboard 節點設定注入完成。"
+`;
+}
+
+// 05. LB HAProxy + Keepalived 離線注入
+function buildInjectLbScript(data){
+  const mgrBackends = data.mgr.map(m => `    server ${m.name} ${m.ip}:1514 check`).join('\n');
+  const dashBackend = data.dash[0] ? `    server dashboard ${data.dash[0].ip}:443 check` : '    # 未設定 Dashboard';
+  const body = data.lb.map((h,i) => `${vmidWarn(h)}VMID=${h.vmid || '??'}   # ${h.name} (${h.ip}) ${i===0?'[MASTER]':'[BACKUP]'}
+pve_mount_vm "$VMID"
+cat <<EOF > /mnt/pve_mount/etc/haproxy/haproxy.cfg
+global
+    log /dev/log local0
+    user haproxy
+    group haproxy
+defaults
+    log global
+    mode tcp
+    timeout connect 5s
+    timeout client 50s
+    timeout server 50s
+frontend wazuh_agent_1514
+    bind ${data.needsVip ? data.vip : h.ip}:1514
+    mode tcp
+    default_backend wazuh_managers_1514
+backend wazuh_managers_1514
+    mode tcp
+    balance roundrobin
+${mgrBackends}
+frontend wazuh_dashboard_frontend
+    bind ${data.needsVip ? data.vip : h.ip}:443
+    mode tcp
+    default_backend wazuh_dashboard_backend
+backend wazuh_dashboard_backend
+    mode tcp
+${dashBackend}
+EOF
+${data.needsVip ? `cat <<EOF > /mnt/pve_mount/etc/keepalived/keepalived.conf
+vrrp_instance VI_1 {
+    state ${i===0?'MASTER':'BACKUP'}
+    interface ens18
+    virtual_router_id 51
+    priority ${i===0?101:100}
+    advert_int 1
+    authentication {
+        auth_type PASS
+        auth_pass ${data.clusterKey.slice(0,8)}
+    }
+    virtual_ipaddress {
+        ${data.vip}/${data.vipCidr}
+    }
+}
+EOF
+` : '# LB 只有 1 台,不需要 Keepalived/VIP,略過 keepalived.conf'}
+pve_unmount_vm "$VMID"
+`).join('\n');
+
+  return `#!/bin/bash
+# 05-inject-lb.sh —— 模式 A:PVE 宿主機離線注入 HAProxy + Keepalived 設定
+# 前提:VM 磁碟模板內已預先裝好 haproxy${data.needsVip ? ' 與 keepalived' : ''} 套件。
+set -e
+
+${pveDiskHelperBlock()}
+${body}
+echo "全部 LB 節點設定注入完成。"
+`;
+}
+
+// 06. NIDS(Suricata + Agent localfile)離線注入,含選填的 Suricata 規則庫訂閱 key
+function buildInjectNidsScript(data){
+  const agentAddr = data.needsVip ? data.vip : (data.lb[0] ? data.lb[0].ip : (data.mgr[0] ? data.mgr[0].ip : ''));
+  const body = data.nids.map(h => `${vmidWarn(h)}VMID=${h.vmid || '??'}   # ${h.name} (${h.ip})
+pve_mount_vm "$VMID"
+cat <<'EOF' >> /mnt/pve_mount/var/ossec/etc/ossec.conf
+<ossec_config>
+  <localfile>
+    <log_format>json</log_format>
+    <location>/var/log/suricata/eve.json</location>
+  </localfile>
+</ossec_config>
+EOF
+${h.suricataKey ? `# 此節點有填寫 Suricata 規則庫訂閱 key,寫入 suricata-update 的來源設定
+mkdir -p /mnt/pve_mount/etc/suricata
+cat <<EOF >> /mnt/pve_mount/etc/suricata/update.yaml
+# --- 由部署工具自動附加(${h.name}) ---
+sources:
+  et/pro:
+    subscription: "${h.suricataKey}"
+EOF
+` : '# 此節點未填寫 Suricata 規則庫訂閱 key,僅使用免費開源規則來源(suricata-update 預設)'}
+pve_unmount_vm "$VMID"
+`).join('\n');
+
+  return `#!/bin/bash
+# 06-inject-nids.sh —— 模式 A:PVE 宿主機離線注入 NIDS(Suricata + Agent)設定
+# 前提:VM 磁碟模板內已預先裝好 suricata 與 wazuh-agent 套件。
+# Agent 連線位址(WAZUH_MANAGER)為: ${agentAddr || '<尚未設定 LB/Manager IP>'}
+# 若某節點有填寫 Suricata 規則庫訂閱 key(選填),會一併寫入 suricata-update 設定;
+# 沒填的節點則維持只用免費開源規則來源,不影響部署。
+set -e
+
+${pveDiskHelperBlock()}
+${body}
+echo "全部 NIDS 節點設定注入完成。記得離線注入不會自動跑 suricata-update,VM 開機連上網後仍需手動或排程執行一次 'sudo suricata-update'。"
+`;
+}
+
+// ============================================================
+// All-in-One 單機建置(官方 wazuh-install.sh -a,依 Wazuh Quickstart 文件)
+// ============================================================
+function buildAllInOneDiskInjectScript(data){
+  const aio = data.allInOne;
+  return `#!/bin/bash
+# all-in-one-pve-inject.sh —— 模式 A:PVE 宿主機離線注入 All-in-One 單機的靜態 IP + SSH 公鑰
+# 目標主機: ${aio.hostname} (${aio.ip || '<尚未填寫 IP>'})
+# 執行位置:PVE 宿主機,不需要 VM 已開機、不需要裝 QEMU Guest Agent。
+set -e
+
+${pveDiskHelperBlock()}
+[ -f /root/.ssh/id_rsa.pub ] || ssh-keygen -t rsa -N "" -f /root/.ssh/id_rsa
+PUB_KEY=$(cat /root/.ssh/id_rsa.pub 2>/dev/null || cat /root/.ssh/id_ed25519.pub)
+
+${vmidWarn(aio)}VMID=${aio.vmid || '??'}   # ${aio.hostname} (${aio.ip || '<尚未填寫 IP>'})
+pve_mount_vm "$VMID"
+
+rm -f /mnt/pve_mount/etc/netplan/*.yaml
+cat <<'EOF' > /mnt/pve_mount/etc/netplan/01-netcfg.yaml
+network:
+  version: 2
+  renderer: networkd
+  ethernets:
+    ens18:
+      addresses:
+        - ${aio.ip || '<請填 IP>'}/24
+      routes:
+        - to: default
+          via: ${data.gateway || '<gateway>'}
+      nameservers:
+        addresses:
+          - ${data.dnsServer || '8.8.8.8'}
+EOF
+chmod 600 /mnt/pve_mount/etc/netplan/01-netcfg.yaml
+
+mkdir -p /mnt/pve_mount/home/${data.sshUser}/.ssh
+echo "$PUB_KEY" >> /mnt/pve_mount/home/${data.sshUser}/.ssh/authorized_keys
+chown -R 1000:1000 /mnt/pve_mount/home/${data.sshUser}/.ssh
+chmod 700 /mnt/pve_mount/home/${data.sshUser}/.ssh
+chmod 600 /mnt/pve_mount/home/${data.sshUser}/.ssh/authorized_keys
+
+pve_unmount_vm "$VMID"
+echo "All-in-One 主機靜態 IP + SSH 金鑰注入完成。開機後用 ssh ${data.sshUser}@${aio.ip || '<IP>'} 確認可以免密碼登入,再執行 all-in-one-install.sh。"
+`;
+}
+
+function buildAllInOneScript(data){
+  const aio = data.allInOne;
+  return `#!/bin/bash
+# all-in-one-install.sh —— 單機把 Indexer + Manager + Dashboard 全部裝在同一台
+# 依據 Wazuh 官方 Quickstart 文件(documentation.wazuh.com/current/quickstart.html)的安裝流程。
+# 用途:POC / Demo / 資源有限環境快速起一套「無 HA」的完整 Wazuh。
+# 目標主機: ${aio.hostname}${aio.ip ? ' (' + aio.ip + ')' : '(尚未填寫 IP,請自行帶入實際 IP)'}
+# ⚠️ 這是「額外」提供的單機安裝路徑,跟上面多角色叢集部署(inventory.yml/site.yml)彼此獨立,
+#    兩者不要對同一批主機同時執行,All-in-One 沒有 HA、無法水平擴充,僅建議用於測試/POC。
+#
+# 官方硬體建議(依受管端點/Agent 數量,90 天索引保留):
+#   1–25 台端點  : 4 vCPU / 8 GiB RAM / 50GB 儲存
+#   25–50 台端點 : 8 vCPU / 8 GiB RAM / 100GB 儲存
+#   50–100 台端點: 8 vCPU / 8 GiB RAM / 200GB 儲存
+#   （超過 100 台端點官方建議改走分散式多節點部署,即本包主要的多角色叢集架構）
+# 支援的作業系統:Amazon Linux 2/2023、CentOS Stream 10、RHEL 7/8/9/10、
+#                Ubuntu 16.04/18.04/20.04/22.04/24.04(64-bit x86_64 或 ARM64)
+set -e
+
+echo "=== 下載官方 Wazuh 安裝輔助工具(installation assistant) ==="
+curl -sO https://packages.wazuh.com/4.x/wazuh-install.sh
+
+echo "=== 執行 All-in-One 安裝(-a:Indexer + Manager + Dashboard 同機一次裝好) ==="
+# 官方旗標是 -a,沒有 --all-in-one 這個寫法,官方文件範例如下:
+#   curl -sO https://packages.wazuh.com/4.14/wazuh-install.sh && sudo bash ./wazuh-install.sh -a
+sudo bash wazuh-install.sh -a
+
+echo ""
+echo "=== 安裝完成 ==="
+echo "終端機輸出最後會直接顯示:"
+echo "  INFO: You can access the web interface https://<WAZUH_DASHBOARD_IP_ADDRESS>"
+echo "      User: admin"
+echo "      Password: <ADMIN_PASSWORD>"
+echo "請立即記錄這組密碼,之後要重新查詢請執行:"
+echo "  sudo tar -O -xvf wazuh-install-files.tar wazuh-install-files/wazuh-passwords.txt"
+echo ""
+echo "建議(官方推薦做法):安裝完成後停用 Wazuh 套件庫,避免之後 apt upgrade 時被意外升級版本、打壞現有環境:"
+echo "  sudo sed -i \\"s/^deb /#deb /\\" /etc/apt/sources.list.d/wazuh.list"
+echo ""
+echo "若要之後解除安裝整套 Wazuh 中心元件:"
+echo "  sudo bash wazuh-install.sh -u   # 或 --uninstall"
+echo ""
+echo "驗證:瀏覽器開 https://${aio.ip || '<主機IP>'} 應能看到 Dashboard 登入畫面(首次連線瀏覽器會警告憑證不受信任,是預期行為,自簽憑證,可接受例外繼續)。"
+`;
+}
+
+function buildAllInOneReadme(data){
+  const aio = data.allInOne;
+  return `# All-in-One 單機建置說明
+
+這份是「額外」提供的單機安裝路徑,跟本包主要的多角色叢集部署(inventory.yml / site.yml)完全獨立、互不影響。
+內容依據 Wazuh 官方 Quickstart 文件整理:https://documentation.wazuh.com/current/quickstart.html
+
+## 適用情境
+
+- POC / Demo,客戶只想先看功能,不在意 HA
+- 資源有限、監控端點數不多(官方建議 100 台端點以下)的小型環境
+- 正式量產、有 HA 需求,或端點數上看百台以上的環境**不要用這個**,請用本包主要的多角色叢集部署
+
+## 官方硬體建議(依受監控端點/Agent 數量,可查詢 90 天索引資料)
+
+| 端點數量 | CPU | RAM | 儲存空間(90天) |
+|---|---|---|---|
+| 1–25 | 4 vCPU | 8 GiB | 50 GB |
+| 25–50 | 8 vCPU | 8 GiB | 100 GB |
+| 50–100 | 8 vCPU | 8 GiB | 200 GB |
+
+超過 100 台端點,官方建議改走分散式多節點部署(即本包主要的多角色叢集架構,有 HA、可水平擴充)。
+
+## 支援作業系統
+
+Amazon Linux 2 / Amazon Linux 2023、CentOS Stream 10、Red Hat Enterprise Linux 7/8/9/10、
+Ubuntu 16.04 / 18.04 / 20.04 / 22.04 / 24.04(需 64-bit x86_64/AMD64 或 AARCH64/ARM64 處理器)。
+
+## 目標主機
+
+- 主機名稱: \`${aio.hostname}\`
+- IP: \`${aio.ip || '(尚未填寫,請自行帶入實際 IP)'}\`
+${aio.vmid ? `- PVE VM ID: \`${aio.vmid}\`` : ''}
+
+## 執行方式
+
+把 \`all-in-one-install.sh\` 帶到目標主機上執行:
+
+\`\`\`bash
+chmod +x all-in-one-install.sh
+./all-in-one-install.sh
+\`\`\`
+
+背後就是官方安裝輔助工具搭配 \`-a\` 旗標(**不是** \`--all-in-one\`,官方文件裡沒有這個長寫法):
+
+\`\`\`bash
+curl -sO https://packages.wazuh.com/4.x/wazuh-install.sh && sudo bash ./wazuh-install.sh -a
+\`\`\`
+
+會在同一台主機依序裝好 Wazuh Indexer、Wazuh Server(Manager)、Wazuh Dashboard,並自動處理彼此的憑證與連線設定。
+
+## 安裝完成後
+
+1. 終端機輸出的最後會直接顯示登入資訊:
+   \`\`\`text
+   INFO: You can access the web interface https://<WAZUH_DASHBOARD_IP_ADDRESS>
+       User: admin
+       Password: <ADMIN_PASSWORD>
+   \`\`\`
+   **立即記錄這組密碼**,離開畫面後不會再顯示。
+2. 之後要重新查詢 Indexer/API 各帳號密碼(不只 admin 一組),執行:
+   \`\`\`bash
+   sudo tar -O -xvf wazuh-install-files.tar wazuh-install-files/wazuh-passwords.txt
+   \`\`\`
+3. 瀏覽器開 \`https://${aio.ip || '<主機IP>'}\`,帳號 \`admin\`、密碼用上面查到的值登入。首次連線瀏覽器會顯示憑證不受信任的警告,這是預期行為(自簽憑證),接受例外繼續即可,或之後換成受信任 CA 簽發的憑證。
+
+## 官方建議:安裝完成後停用套件庫自動更新
+
+避免之後 \`apt upgrade\` 把版本升上去、打壞現有已驗證過的環境:
+
+\`\`\`bash
+sudo sed -i "s/^deb /#deb /" /etc/apt/sources.list.d/wazuh.list
+\`\`\`
+
+## 如果要解除安裝
+
+\`\`\`bash
+sudo bash wazuh-install.sh -u   # 或 --uninstall
+\`\`\`
+
+## 之後要擴充成多角色 HA 叢集怎麼辦?
+
+All-in-One 沒有官方「原地擴展」路徑,建議做法是:重新用本包主要的多角色叢集部署(inventory.yml/site.yml)在其他主機上建一套完整叢集,驗證通過後再把 All-in-One 這台的資料匯出/棄用,不要嘗試把 All-in-One 節點強行併入叢集。
+`;
+}
+
 function buildSopManual(data){
   const mgrMaster = data.mgr[0];
   const mgrWorkers = data.mgr.slice(1);
@@ -2080,8 +2604,14 @@ ${data.mgr.map(h=>`    - name: ${h.name}\n      ip: ${h.ip}`).join('\n')}
   dashboard:
 ${data.dash.map(h=>`    - name: ${h.name}\n      ip: ${h.ip}`).join('\n')}`;
 
-  const indexerSection = data.idx.map((h,i)=>`
-#### ${h.name} (${h.ip})
+  const modeAIntro = (title, scriptFile) => data.platform==='pve' ? `> **模式 A(PVE 宿主機離線磁碟注入,VM 開不了機/沒裝 Guest Agent 時用)**:直接執行本包內的
+> \`pve-disk-inject/${scriptFile}\`(檔案位置:本次下載 zip 解壓後的 \`pve-disk-inject/${scriptFile}\`),
+> 會自動 \`qm stop\` → 掛硬碟寫設定 → \`qm start\`,不需要 VM 網路已通、不需要 SSH 進 VM。
+> 下面列的是**模式 B(VM 已可正常開機連線時,直接 SSH 進去手動做)**,兩者擇一執行即可,不要對同一台重複做。
+` : '';
+
+  const indexerSection = modeAIntro('Indexer', '02-inject-indexer.sh') + data.idx.map((h,i)=>`
+#### ${h.name} (${h.ip}) — 模式 B:VM 設備內部手動安裝
 
 \`\`\`bash
 curl -s https://packages.wazuh.com/key/GPG-KEY-WAZUH | sudo gpg --dearmor -o /usr/share/keyrings/wazuh.gpg
@@ -2146,8 +2676,8 @@ sudo /usr/share/wazuh-indexer/bin/indexer-security-admin.sh \\
 #   -cert .../admin.pem -key .../admin-key.pem -h ${h.ip} -p 9200 -icl -nhnv
 \`\`\`` : ''}`).join('\n');
 
-  const managerSection = data.mgr.map((h,i)=>`
-#### ${h.name} (${h.ip})${i===0 ? ' — Master' : ' — Worker'}
+  const managerSection = modeAIntro('Manager', '03-inject-manager.sh') + data.mgr.map((h,i)=>`
+#### ${h.name} (${h.ip})${i===0 ? ' — Master' : ' — Worker'} — 模式 B:VM 設備內部手動安裝
 
 \`\`\`bash
 sudo apt install -y wazuh-manager
@@ -2234,8 +2764,8 @@ sudo systemctl restart filebeat
 sudo systemctl enable filebeat
 \`\`\``).join('\n');
 
-  const dashboardSection = data.dash.map(h=>`
-#### ${h.name} (${h.ip})
+  const dashboardSection = modeAIntro('Dashboard', '04-inject-dashboard.sh') + data.dash.map(h=>`
+#### ${h.name} (${h.ip}) — 模式 B:VM 設備內部手動安裝
 
 \`\`\`bash
 sudo apt install -y wazuh-dashboard
@@ -2274,10 +2804,10 @@ sudo systemctl enable wazuh-dashboard
 sudo systemctl restart wazuh-dashboard
 \`\`\``).join('\n');
 
-  const nidsSection = data.nids.map(h=>{
+  const nidsSection = modeAIntro('NIDS', '06-inject-nids.sh') + data.nids.map(h=>{
     const ifaceKnown = !!h.captureIface;
     return `
-#### ${h.name} (${h.ip})${ifaceKnown ? `,監聽介面 ${h.captureIface}(你在網頁上已填寫,不用現場偵測)` : '(監聽介面編號未預先填寫,用下面腳本自動偵測)'}
+#### ${h.name} (${h.ip})${ifaceKnown ? `,監聽介面 ${h.captureIface}(你在網頁上已填寫,不用現場偵測)` : '(監聽介面編號未預先填寫,用下面腳本自動偵測)'} — 模式 B:VM 設備內部手動安裝${h.suricataKey ? `(已填寫 Suricata 規則庫訂閱 key)` : ''}
 
 ${ifaceKnown ? `這台的監聽介面你已經在網頁上填好是 \`${h.captureIface}\`,下面指令直接複製貼上即可,不用先跑偵測。` : `**不用自己用眼睛看 \`ip a\` 比對**,跑下面這段自動偵測腳本,它會排除管理介面跟 \`lo\`,剩下「恰好一張」才自動採用;無法唯一判斷就會停下來列出候選,要你確認後手動指定,不會用猜的:
 
@@ -2346,6 +2876,13 @@ ip link show "$MIRROR_IFACE"   # 輸出要有 PROMISC 標記
 sudo add-apt-repository ppa:oisf/suricata-stable -y
 sudo apt update && sudo apt install -y suricata jq
 sudo sed -i "s/interface: eth0/interface: \${MIRROR_IFACE}/g" /etc/suricata/suricata.yaml
+${h.suricataKey ? `
+# 這台有填寫 Suricata 規則庫訂閱 key,設定額外規則來源(例如 ET Pro)後再跑 suricata-update:
+sudo tee -a /etc/suricata/update.yaml > /dev/null <<'EOF'
+sources:
+  et/pro:
+    subscription: "${h.suricataKey}"
+EOF` : '# 未填寫訂閱 key,僅使用 suricata-update 預設的免費開源規則來源'}
 sudo suricata-update
 sudo systemctl enable --now suricata
 \`\`\`
@@ -2383,7 +2920,8 @@ ls -la /var/ossec/etc/client.keys
   }).join('\n');
 
   const lbSection = data.lb.length ? `
-LB 用 HAProxy(+ ${data.lb.length >= 2 ? 'Keepalived,因為有 ' + data.lb.length + ' 台需要 VIP 漂移' : '單台,不需要 Keepalived/VIP'}):
+${modeAIntro('LB', '05-inject-lb.sh')}
+模式 B(VM 設備內部手動安裝):LB 用 HAProxy(+ ${data.lb.length >= 2 ? 'Keepalived,因為有 ' + data.lb.length + ' 台需要 VIP 漂移' : '單台,不需要 Keepalived/VIP'}):
 
 \`\`\`bash
 sudo apt install -y haproxy${data.lb.length >= 2 ? ' keepalived' : ''}
@@ -2484,7 +3022,34 @@ echo "vm.max_map_count=262144" | sudo tee -a /etc/sysctl.conf
 sudo sysctl -p
 \`\`\`
 
-## ${b+1}. SSL 憑證生成(在中央控制機或任一台 Manager 執行一次即可)
+## ${b+1}. SSH 金鑰部署(讓控制機/PVE 宿主機能免密碼登入每台 VM)
+
+${data.platform==='pve' ? `**模式 A(PVE 宿主機離線批次注入,VM 開不了機/沒裝 Guest Agent 時用)**:直接在 PVE 宿主機執行本包內的
+\`pve-disk-inject/01-inject-sshkey.sh\`(檔案位置:zip 解壓後的 \`pve-disk-inject/01-inject-sshkey.sh\`)。
+它會自動用 PVE 宿主機自己的公鑰(沒有就先產生一組),逐台 \`qm stop\` → 掛硬碟寫入 \`~${data.sshUser}/.ssh/authorized_keys\` → \`qm start\`,
+不需要 VM 網路已通、不需要 SSH 密碼。
+
+` : ''}**模式 B(VM 已可連線時,用 ssh-copy-id 逐台佈署)**:
+
+\`\`\`bash
+[ -f ~/.ssh/id_rsa ] || ssh-keygen -t rsa -N "" -f ~/.ssh/id_rsa
+
+# 下面清單填入這次部署的全部 VM IP(不含 PVE 宿主機自己)
+for ip in ${[...data.idx, ...data.mgr, ...data.dash, ...data.lb, ...data.nids].map(h=>h.ip).join(' ')}; do
+  ssh-copy-id -o StrictHostKeyChecking=no ${data.sshUser}@$ip
+done
+\`\`\`
+
+**✅ 驗證:**
+
+\`\`\`bash
+for ip in ${[...data.idx, ...data.mgr, ...data.dash, ...data.lb, ...data.nids].map(h=>h.ip).join(' ')}; do
+  ssh ${data.sshUser}@$ip "hostname"
+done
+# 全部都要能直接印出主機名稱,不會再被要求輸入密碼
+\`\`\`
+
+## ${b+2}. SSL 憑證生成(在中央控制機或任一台 Manager 執行一次即可)
 
 \`\`\`bash
 curl -sO https://packages.wazuh.com/4.x/wazuh-certs-tool.sh
@@ -2503,22 +3068,22 @@ bash wazuh-certs-tool.sh -A
 **✅ 驗證:**\`ls -la *.pem\`,應該看到 \`root-ca.pem\`、\`admin.pem\`、\`admin-key.pem\`,以及每個節點各一組
 \`<主機名稱>.pem\`/\`<主機名稱>-key.pem\`。產生後把對應節點的檔案 \`scp\` 到各自主機(下面每節會說放哪個目錄)。
 
-## ${b+2}. Wazuh Indexer 部署
+## ${b+3}. Wazuh Indexer 部署
 ${indexerSection}
 
-## ${b+3}. Wazuh Manager 部署 + Filebeat OSS
+## ${b+4}. Wazuh Manager 部署 + Filebeat OSS
 ${managerSection}
 
-## ${b+4}. Wazuh Dashboard 部署
+## ${b+5}. Wazuh Dashboard 部署
 ${dashboardSection}
 
-## ${b+5}. 負載平衡 LB
+## ${b+6}. 負載平衡 LB
 ${lbSection || '本次未設定 LB。'}
 
-## ${b+6}. NIDS(Suricata + Agent,鏡像埠側錄)
+## ${b+7}. NIDS(Suricata + Agent,鏡像埠側錄)
 ${nidsSection || '本次未設定 NIDS。'}
 
-## ${b+7}. 歷史日誌保留策略(避免硬碟被日誌塞爆)
+## ${b+8}. 歷史日誌保留策略(避免硬碟被日誌塞爆)
 
 預設 OpenSearch 索引永久保留,建議設定自動清理(以 90 天為例)。開啟 Dashboard → 主選單 →
 **Indexer management → Index Management → State management policies → Create policy**,選
@@ -2542,7 +3107,7 @@ ${nidsSection || '本次未設定 NIDS。'}
 
 點右下角 **Create**,之後每天新產生的索引都會自動套用,不用再手動設定。
 
-## ${b+8}. 全系統健康檢查總表(部署完直接照跑一輪)
+## ${b+9}. 全系統健康檢查總表(部署完直接照跑一輪)
 
 | # | 檢查項目 | 指令(在哪台執行) | 合格標準 |
 |---|---|---|---|
@@ -2565,11 +3130,16 @@ ${data.nids.length ? `| 8 | NIDS 監聽介面混雜模式 | \`ip link show "$MIR
   以及 Ubuntu 24.04(Kernel 6.8)Seccomp 崩潰,這三個都很難從表面錯誤訊息直接看出原因。
 - Dashboard 的 \`wazuh.yml\`(API 連線設定)常常被漏掉,漏了不會讓 Dashboard 起不來,
   只會讓「Agents / 規則」等 Wazuh App 功能連不上,容易被誤判成別的問題。
-- NIDS 監聽介面編號因主機而異,不能寫死,務必依「## ${b+6}. NIDS」段落的自動偵測腳本現場確認,不要用猜的。
+- NIDS 監聽介面編號因主機而異,不能寫死,務必依「## ${b+7}. NIDS」段落的自動偵測腳本現場確認,不要用猜的。
 - 批次腳本(尤其之後若改用 Ansible/自動化)每次改動前,務必對照第 1 節的完整主機清單,確認目標涵蓋所有節點——漏掉 LB/VIP 這類容易被忽略的輔助元件,是最常見的踩坑之一。
 - 部署完成後,\`opensearch_admin_password\`(目前是 \`${data.opensearchPass}\`)與 Dashboard API 的
   \`wazuh-wui\`/\`wazuh-wui\`(目前仍是官方預設值)都建議儘快透過 \`wazuh-passwords-tool.sh\` 更新為
   正式密碼,不要長期沿用這裡產生的初始值。
+${data.platform==='pve' ? `- 執行 \`netplan apply\` 那一瞬間網卡 IP 會改變,若你是透過現在這條 SSH 連線去執行,連線本身可能當場卡死或斷線——這不是失敗,是正常現象,重新用新 IP 連回去即可;不確定的話優先用「模式 A」離線磁碟注入,完全不會遇到這個問題。
+- \`sudo\` 在沒有 Pseudo-TTY(例如某些非互動式批次執行方式)的情況下,遇到需要輸入密碼的提權會直接被系統拒絕退回,不會等你輸入;建議搭配 \`ssh -t\` 或先完成本節「SSH 金鑰部署」改用金鑰,避免密碼提權這個坑。
+- 用 PVE NoVNC 網頁主控台貼長指令時,HTML5 Console 常會把長字串截斷或貼壞,不要在 NoVNC 裡貼多行 heredoc 指令,改用 SSH 終端機貼上,或直接跑「模式 A」的磁碟注入腳本(完全不需要進 VM 主控台)。
+` : ''}- Keepalived 重開機後有可能讀到舊版設定檔,把舊 IP 透過 VRRP 重新綁回網卡;如果之後有對這批機器做過 IP 變更,務必用 \`grep -r "<舊IP>" /etc/keepalived/\` 確認沒有殘留,不要假設改一次就永久生效。
+${data.nids.some(h=>h.suricataKey) ? `- 本次有節點填寫了 Suricata 規則庫訂閱 key,這組 key 屬於付費規則庫授權碼,跟 OpenSearch/SSH 密碼一樣要妥善保管,不要一併打包進交給非相關人員的文件。` : ''}
 `;
 }
 
@@ -2589,6 +3159,11 @@ function readForm(){
   const opensearchPassField = document.getElementById('opensearchPassInput').value.trim();
   const opensearchPass = opensearchPassField || randomPassword(16);
 
+  const allInOneEnabled = document.getElementById('allInOneToggle')?.checked || false;
+  const allInOneHostname = document.getElementById('allInOneHostname')?.value.trim() || 'Vista-AllInOne';
+  const allInOneIp = document.getElementById('allInOneIp')?.value.trim() || '';
+  const allInOneVmid = document.getElementById('allInOneVmid')?.value.trim() || '';
+
   return {
     customerName, sshUser, sshPass, clusterKey, vip, vipCidr, dnsServer, gateway, platform, opensearchPass, needsVip,
     idx: collectHosts('idx'),
@@ -2596,11 +3171,17 @@ function readForm(){
     dash: collectHosts('dash'),
     lb: collectHosts('lb'),
     nids: collectHosts('nids'),
+    allInOne: { enabled: allInOneEnabled, hostname: allInOneHostname, ip: allInOneIp, vmid: allInOneVmid },
   };
 }
 
 function validate(data){
   const errs = [];
+  if(data.allInOne && data.allInOne.enabled){
+    if(!data.allInOne.hostname) errs.push('All-in-One 模式:請填寫主機名稱');
+    if(!data.allInOne.ip) errs.push('All-in-One 模式:請填寫 IP 位址');
+    return errs;
+  }
   if(!data.idx.length) errs.push('至少需要 1 台 Indexer 且填妥主機名稱與 IP');
   if(!data.mgr.length) errs.push('至少需要 1 台 Manager 且填妥主機名稱與 IP');
   if(data.needsVip && !data.vip) errs.push('LB 有 2 台以上,需填寫 VIP');
@@ -2616,6 +3197,10 @@ function previewInventory(){
     box.value = '⚠️ 尚有欄位未填妥:\\n- ' + errs.join('\\n- ');
     return;
   }
+  if(data.allInOne && data.allInOne.enabled){
+    box.value = 'All-in-One 模式沒有 inventory.yml(那是多角色叢集才需要的 Ansible 主機清單)。\\n這個模式按「產生並下載」會直接拿到 all-in-one-install.sh,單一台主機執行即可,不需要主機清單。';
+    return;
+  }
   box.value = buildInventory(data);
 }
 
@@ -2626,6 +3211,10 @@ function previewSop(){
   box.style.display = 'block';
   if(errs.length){
     box.value = '⚠️ 尚有欄位未填妥:\\n- ' + errs.join('\\n- ');
+    return;
+  }
+  if(data.allInOne && data.allInOne.enabled){
+    box.value = buildAllInOneReadme(data) + '\\n\\n---\\n\\n' + buildAllInOneScript(data);
     return;
   }
   box.value = buildSopManual(data);
@@ -2667,7 +3256,7 @@ sudo ip addr del 192.168.168.250/24 dev vmbr0
 [ -f ~/.ssh/id_rsa ] || ssh-keygen -t rsa -N "" -f ~/.ssh/id_rsa
 
 # 下面清單請填入全部「VM」的舊 IP(不含 PVE 宿主機自己)
-for ip in 10.9.55.82 10.9.55.83 10.9.55.84 10.9.55.85 10.9.55.86 10.9.55.87 10.9.55.91 10.9.55.92; do
+for ip in 10.9.55.82 10.9.55.83 10.9.55.84 10.9.55.85 10.9.55.86 10.9.55.87 10.9.55.88 10.9.55.89 10.9.55.91 10.9.55.92; do
   ssh-copy-id -o StrictHostKeyChecking=no <SSH帳號>@$ip
 done
 \`\`\`
@@ -2675,7 +3264,7 @@ done
 **✅ 驗證:**
 
 \`\`\`bash
-for ip in 10.9.55.82 10.9.55.83 10.9.55.84 10.9.55.85 10.9.55.86 10.9.55.87 10.9.55.91 10.9.55.92; do
+for ip in 10.9.55.82 10.9.55.83 10.9.55.84 10.9.55.85 10.9.55.86 10.9.55.87 10.9.55.88 10.9.55.89 10.9.55.91 10.9.55.92; do
   ssh <SSH帳號>@$ip "hostname"
 done
 # 全部都要能直接印出主機名稱,不會再被要求輸入密碼
@@ -2725,6 +3314,9 @@ declare -A OLD2NEW=(
   ["10.9.55.87"]="192.168.168.137"
   ["10.9.55.91"]="192.168.168.141"
   ["10.9.55.92"]="192.168.168.142"
+  ["10.9.55.88"]="192.168.168.138"   # LB1
+  ["10.9.55.89"]="192.168.168.139"   # LB2
+  ["10.9.55.90"]="192.168.168.140"   # VIP
 )
 
 # Indexer:憑證 + opensearch.yml
@@ -2744,9 +3336,31 @@ ssh <SSH帳號>@10.9.55.91 "sudo sed -i \\"s/10.9.55.82/\${OLD2NEW[10.9.55.82]}/
 
 # NIDS/Agent
 ssh <SSH帳號>@10.9.55.92 "sudo sed -i \\"s/10.9.55.82/\${OLD2NEW[10.9.55.82]}/g\\" /var/ossec/etc/ossec.conf"
+
+# LB(HAProxy):後端指向的 Manager/Dashboard IP,以及自己的 bind IP 都要換
+for old_ip in 10.9.55.88 10.9.55.89; do
+  new_ip="\${OLD2NEW[$old_ip]}"
+  ssh <SSH帳號>@"$old_ip" "sudo sed -i \\
+    -e \\"s/10.9.55.82/\${OLD2NEW[10.9.55.82]}/g\\" \\
+    -e \\"s/10.9.55.83/\${OLD2NEW[10.9.55.83]}/g\\" \\
+    -e \\"s/10.9.55.84/\${OLD2NEW[10.9.55.84]}/g\\" \\
+    -e \\"s/10.9.55.91/\${OLD2NEW[10.9.55.91]}/g\\" \\
+    -e \\"s/$old_ip/$new_ip/g\\" \\
+    /etc/haproxy/haproxy.cfg"
+done
+
+# Keepalived(⚠️之前這份文件在這裡只有文字提醒、沒有實際指令,是遺漏——這裡補上):
+# virtual_ipaddress 的舊 VIP 一定要換成新 VIP,不然重開機/服務重啟時 VRRP 會把舊 IP 搶佔回網卡
+for old_ip in 10.9.55.88 10.9.55.89; do
+  ssh <SSH帳號>@"$old_ip" "sudo sed -i \\
+    -e \\"s/10.9.55.90/\${OLD2NEW[10.9.55.90]}/g\\" \\
+    -e \\"s/10.9.55.88/\${OLD2NEW[10.9.55.88]}/g\\" \\
+    -e \\"s/10.9.55.89/\${OLD2NEW[10.9.55.89]}/g\\" \\
+    /etc/keepalived/keepalived.conf && sudo systemctl restart keepalived"
+done
 \`\`\`
 
-> 若有部署 LB/VIP,記得把 \`/etc/keepalived/keepalived.conf\` 跟 \`/etc/haproxy/haproxy.cfg\` 也一併納入。**批次腳本最容易出的錯就是「目標清單漏節點」**,每跑完一台建議用 \`ssh <SSH帳號>@<IP> "cat <該設定檔>"\` 檢查內容有沒有真的換成新 IP,不要整段貼完就假設成功。
+> **批次腳本最容易出的錯就是「目標清單漏節點」**——上一版這份文件在 LB/Keepalived 這段只寫了文字提醒、沒有實際指令,就是一個活生生的例子,已經在這裡補上。每跑完一台建議用 \`ssh <SSH帳號>@<IP> "cat <該設定檔>"\` 檢查內容有沒有真的換成新 IP,不要整段貼完就假設成功。
 
 ## 5. 批次切換所有 VM 的 Netplan IP(⚠️同樣不含 PVE 宿主機)
 
@@ -2839,6 +3453,43 @@ async function generatePackage(){
   status.textContent = '產生中...';
 
   const zip = new JSZip();
+
+  if(data.allInOne && data.allInOne.enabled){
+    // ===== All-in-One 精簡包 =====
+    const root = zip.folder(data.customerName + '-allinone-deploy');
+    root.file('all-in-one-install.sh', buildAllInOneScript(data));
+    root.file('README.md', buildAllInOneReadme(data));
+    if(data.platform === 'pve'){
+      root.file('00-pve-disk-inject.sh', buildAllInOneDiskInjectScript(data));
+    } else if(data.platform === 'vmware'){
+      root.file('00-vmware-customize-notes.md', buildVmwareNotes(data));
+    }
+    try{
+      const blob = await zip.generateAsync({type:'blob'});
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = data.customerName + '-allinone-deploy.zip';
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      URL.revokeObjectURL(url);
+      status.className = 'ok';
+      status.textContent = '✅ 已產生並下載 ' + data.customerName + '-allinone-deploy.zip(All-in-One 精簡包)';
+      document.getElementById('credOpensearchPass').value = data.opensearchPass;
+      document.getElementById('credClusterKey').value = data.clusterKey;
+      document.getElementById('credsBox').style.display = 'block';
+      if(!document.getElementById('opensearchPassInput').value.trim()){
+        document.getElementById('opensearchPassInput').value = data.opensearchPass;
+      }
+    }catch(e){
+      status.className = 'err';
+      status.textContent = '❌ 產生失敗: ' + e.message;
+    }
+    return;
+  }
+
+  // ===== 多角色叢集完整包 =====
   const root = zip.folder(data.customerName + '-vista-ai-deploy');
 
   root.file('inventory.yml', buildInventory(data));
@@ -2848,6 +3499,15 @@ async function generatePackage(){
   root.file('deploy.sh', buildDeploySh(data.customerName, data.platform));
   if(data.platform === 'pve'){
     root.file('00-set-static-ip.sh', buildPveStage0Script(data));
+    // 模式 A:PVE 宿主機離線磁碟注入腳本組(給 VM 開不了機/沒裝 Guest Agent 時的救援手段用)
+    const injectFolder = root.folder('pve-disk-inject');
+    injectFolder.file('01-inject-sshkey.sh', buildInjectSshKeyScript(data));
+    if(data.idx.length) injectFolder.file('02-inject-indexer.sh', buildInjectIndexerScript(data));
+    if(data.mgr.length) injectFolder.file('03-inject-manager.sh', buildInjectManagerScript(data));
+    if(data.dash.length) injectFolder.file('04-inject-dashboard.sh', buildInjectDashboardScript(data));
+    if(data.lb.length) injectFolder.file('05-inject-lb.sh', buildInjectLbScript(data));
+    if(data.nids.length) injectFolder.file('06-inject-nids.sh', buildInjectNidsScript(data));
+    injectFolder.file('README.md', '# 模式 A:PVE 宿主機離線磁碟注入腳本組\n\n用途:VM 尚未開機、或尚未安裝 QEMU Guest Agent 時,不需要 SSH 進 VM、不需要 VM 網路已通,直接在 PVE 宿主機把設定寫進虛擬硬碟。\n跟 00-set-static-ip.sh(靠 qm guest exec,需要 VM 已開機+裝好 Agent)是兩種不同機制,擇一使用即可;若 VM 已開機且裝了 Agent,優先用 00-set-static-ip.sh 與 SOP.md 的「模式 B」較單純。\n\n執行前請確認每台主機的 PVE VM ID 是否正確(腳本內以 `VMID=??` 標記需要你確認/填入的地方)。\n\n對應章節請見 ../SOP.md 各節的「模式 A」段落。\n');
   } else if(data.platform === 'vmware'){
     root.file('00-vmware-customize-notes.md', buildVmwareNotes(data));
   }
