@@ -1,36 +1,41 @@
-# Wazuh 部署設定修正
+# Wazuh / PVE 部署修正
 
-基準版本：6a495572ce2475a116b033394e862750d54ceebe。
+更新 index.html 後必須重新產生部署 ZIP；不會自動修復已部署 VM。現有環境請先備份及確認實際帳密、CA、版本與磁碟配置，再套用必要修改。
 
-## 使用方式
+## 已修正
 
-用新版 index.html 取代原檔並重新產生部署 ZIP。新增的 API 密碼欄位須填入 Manager 現有的 wazuh-wui 密碼，與 Indexer admin 密碼不同；產生器不會替你更改 Manager 的密碼。All-in-One 模式不需要填此欄。
+- Dashboard API 指向 Manager Master 55000，API 密碼明確輸入，與 Indexer 帳密分開。
+- 正式 ossec.conf 的 cluster 區塊會備份、去重、替換並重啟 Manager；保留其他設定。
+- 憑證從官方 wazuh-certificates 子目錄複製；檢查完整節點憑證與金鑰，DN 與官方 Wazuh 預設一致，server 指定 master/worker 類型。
+- Dashboard 憑證與設定檔指定服務帳號擁有權及權限。
+- 使用正確 indexer-security-init.sh，僅在回應明確表示尚未初始化時初始化；以官方密碼工具同步 admin/kibanaserver，驗證同步結果。Dashboard 服務改用獨立 kibanaserver 密碼。
+- Indexer 資料路徑改為 /var/lib/wazuh-indexer；不再每次移除 Filebeat 套件或清空 registry。
+- PVE 移除離線磁碟注入。改用 Cloud-Init，預先檢查所有 VM ID、停止狀態與 Cloud-Init 磁碟，不會強制關機、掛載磁碟或自動開機。
+- 移除沒有對應 Manager listener 的 514 轉送；保留 Agent 1514、註冊 1515 與 API 55000。
+- SOP 統一使用 Ansible 完成安裝；AIO 使用官方安裝器的實際密碼。
 
-這次修改不會自動修復已部署的 VM，也不會更新以前下載的 ZIP。現有環境應先備份，再套用必要設定；不要為了修正 cluster 而直接重跑完整安裝，原有安裝流程還會重設 Filebeat registry。
+## 檢查
 
-## 修正內容
-
-- Dashboard API 固定連 Manager Master 的 55000；Agent 仍依 LB 數量選擇 Master、單台 LB 或 VIP。
-- API 密碼改為明確輸入，並處理 YAML 中的引號及特殊字元。
-- Ansible 與 PVE 都會備份正式 ossec.conf，移除重複 cluster，保留其他設定，再寫入一份正確區塊。無效 XML 或空白 Master 位址會停止寫入。
-- Ansible 設定變更會通知並立即執行 Manager 重啟；重跑合併器不會重複追加。
-- PVE 補上 Dashboard wazuh.yml 與檔案權限；HAProxy 補上 1515、55000，並使用 wildcard listener，避免備援 LB 尚未持有 VIP 時無法綁定。
-- 移除 cluster 範本中未列於官方設定參考的 interval，統一叢集名稱。
-- 手動 SOP 改為替換既有 cluster，禁止追加重複區塊。
-- 驗收增加 Dashboard 到 Master 的 API 認證及預期 Manager 成員檢查。
-- 阻擋未填完整的主機、重複名稱、無效 IPv4、無效 cluster key；保留空 inventory 群組，支援單 Master／無 LB。
-
-## 測試
-
-需要 Node.js 及 Python 3。測試使用合成資料，不會連線或部署至伺服器。
+需要 Node.js、Python 3，以及 Bash（Cloud-Init 模擬測試）。
 
 ```text
 python -m pip install -r tests/requirements.txt
 node tests/generator.cjs
 python tests/merge.py
 python tests/templates.py
+bash tests/cloudinit.sh
 ```
 
-測試涵蓋無／單／雙 LB、Master 與 Worker 範本、密碼特殊字元、YAML/Jinja、cluster 去重、保留原設定、備份、重跑不變、拒絕損壞 XML，以及缺少 Worker 時驗收失敗。
+已通過 JavaScript 語法、產生的角色 YAML、Jinja/API 密碼往返、XML 合併與備份/重跑、LB 路由、缺少 Worker 驗收失敗，以及 Cloud-Init 模擬測試。模擬測試確認執行中 VM 在修改前被拒絕，停止的 VM 使用 qm 設定。
 
-另外已檢查三支產生的 PVE 腳本 Bash 語法。尚未在實際 Wazuh／PVE 主機執行完整部署；網路、防火牆、既有帳密及套版狀態仍需現場驗收。
+## 尚需現場驗證
+
+尚未完成真實 Wazuh/PVE 部署、故障切換或效能測試，不能宣稱整套環境已驗收。PVE VM 與磁碟需先建立；資料碟不會自動格式化。跨 PVE 節點請分別準備 VM。NIDS 必須另外設定鏡像/SPAN 流量。
+
+既有叢集必須保留原 CA；新增節點需用同一 CA 補發憑證。套件仍使用 4.x stable 通道，而 Filebeat 模組/索引範本使用固定版本；正式部署前需確認所選 Wazuh 小版本相容。單 Master/Dashboard/LB 仍有單點；Indexer 建議三節點維持多數決。
+
+官方參考：
+- https://documentation.wazuh.com/current/installation-guide/wazuh-indexer/step-by-step.html
+- https://documentation.wazuh.com/current/installation-guide/wazuh-dashboard/step-by-step.html
+- https://documentation.wazuh.com/current/user-manual/user-administration/password-management.html
+- https://pve.proxmox.com/pve-docs/chapter-qm.html#qm_cloud_init
