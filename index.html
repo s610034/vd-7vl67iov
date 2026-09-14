@@ -115,6 +115,13 @@
     </div>
     <div class="row">
       <div class="field">
+        <label>Manager API 的 wazuh-wui 密碼（叢集模式必填）</label>
+        <input type="password" id="wazuhApiPassword" autocomplete="new-password" placeholder="填入 Manager 現有的 wazuh-wui 密碼">
+        <div class="hint">與 Dashboard 網頁登入的 admin 密碼不同。此欄不會變更 Manager 密碼；請先確認現有 API 帳密。全新套件若仍使用預設值，請明確輸入該值。</div>
+      </div>
+    </div>
+    <div class="row">
+      <div class="field">
         <label>虛擬化平台(決定是否產生「宿主機批量塞 IP」腳本)</label>
         <select id="hvPlatform" onchange="onPlatformChange()">
           <option value="pve">Proxmox VE / KVM(用 qm guest exec 批量塞 IP,需 VM 已裝 QEMU Guest Agent)</option>
@@ -666,6 +673,7 @@ function collectHosts(role){
     const suricataKey = b.querySelector('.suricatakey-input')?.value.trim() || '';
     if(name && ip) hosts.push({name, ip, vmid, cpu, ram, osdisk, datadisk, osdiskRaw, osdiskUnit, datadiskRaw, datadiskUnit, captureIface, suricataKey});
   });
+  hosts.incomplete = blocks.some(b => !b.querySelector('.hostname-input')?.value.trim() || !b.querySelector('.ip-input')?.value.trim());
   return hosts;
 }
 
@@ -683,7 +691,7 @@ function randomPassword(len){
 
 function buildInventory(data){
   const sec = (title, hosts) => {
-    if(!hosts.length) return '';
+    if(!hosts.length) return `[${title}]\n\n`;
     let out = `[${title}]\n`;
     hosts.forEach(h=>{
       let line = `${h.name} ansible_host=${h.ip}`;
@@ -715,7 +723,7 @@ function buildGroupVars(data){
   const idxNameList = data.idx.map(h=>`      - "${h.name}"`).join('\n');
   const idxDnList = data.idx.map(h=>`      - "CN=${h.name},OU=VistaAI,O=VistaAI,L=Taipei,C=TW"`).join('\n');
   const mgrMasterIp = data.mgr[0] ? data.mgr[0].ip : '';
-  // agent_connect_address: agent 端(NIDS 等)與 Dashboard API 該連去哪個位址。
+  // agent_connect_address 僅供 Agent 使用；Dashboard API 直接連 Master。
   // LB >= 2 台時走 VIP(有 keepalived 漂移);只有 1 台 LB 時直接打那台 LB 的 IP(沒有 VIP)。
   const agentConnectAddress = (data.lb && data.lb.length >= 2) ? data.vip : (data.lb && data.lb[0] ? data.lb[0].ip : mgrMasterIp);
 
@@ -742,13 +750,13 @@ opensearch_admin_password: "${data.opensearchPass}"
 # --- Manager Master IP (供 worker 節點與 LB 設定引用) ---
 manager_master_ip: "${mgrMasterIp}"
 
-# --- Agent / Dashboard API 對外連線位址 (LB>=2 台走 VIP,只有 1 台 LB 就直接打該 LB IP) ---
+# --- Agent 連線位址 (LB>=2 台走 VIP,只有 1 台 LB 就直接打該 LB IP) ---
 agent_connect_address: "${agentConnectAddress}"
 
-# --- Wazuh Dashboard 內建 API 帳號 (連線 Manager API 用,官方預設值,部署後建議透過
-#     wazuh-passwords-tool.sh 一併更新,目前保留預設以確保與 Manager 端一致可連通) ---
+# --- API 直接連 Master；填入現有密碼，不假設 Manager 使用預設值 ---
+wazuh_api_address: "${mgrMasterIp}"
 wazuh_api_user: "wazuh-wui"
-wazuh_api_password: "wazuh-wui"
+wazuh_api_password: ${JSON.stringify(data.wazuhApiPassword)}
 
 # --- Indexer 節點清單 (供 opensearch.yml / filebeat.yml 樣板引用) ---
 indexer_ips:
@@ -1082,6 +1090,65 @@ function buildIndexerSecurityInitRole(){
 `;
 }
 
+function buildClusterMergeScript(){
+  return String.raw`#!/usr/bin/env python3
+import copy
+import os
+from pathlib import Path
+import shutil
+import sys
+import tempfile
+import xml.etree.ElementTree as ET
+
+target, desired = map(Path, sys.argv[1:3])
+def parse(text):
+    parser = ET.XMLParser(target=ET.TreeBuilder(insert_comments=True))
+    return ET.fromstring('<root>' + text + '</root>', parser=parser)
+
+original = target.read_text(encoding='utf-8')
+root = parse(original)
+configs = root.findall('ossec_config')
+if not configs:
+    raise SystemExit('Missing ossec_config; original file unchanged')
+incoming = parse(desired.read_text(encoding='utf-8'))
+blocks = incoming.findall('.//cluster')
+if len(blocks) != 1:
+    raise SystemExit('Expected exactly one desired cluster')
+block = blocks[0]
+if not (block.findtext('nodes/node') or '').strip():
+    raise SystemExit('Master address is empty; original file unchanged')
+for config in configs:
+    for old in list(config):
+        if old.tag == 'cluster':
+            config.remove(old)
+configs[0].append(copy.deepcopy(block))
+result = ''.join(ET.tostring(child, encoding='unicode') for child in root)
+parse(result)
+if result == original:
+    print('UNCHANGED')
+    raise SystemExit(0)
+stat = target.stat()
+backup_fd, backup = tempfile.mkstemp(prefix=target.name + '.backup-', dir=target.parent)
+os.close(backup_fd)
+shutil.copy2(target, backup)
+fd, temporary = tempfile.mkstemp(prefix=target.name + '.tmp-', dir=target.parent)
+try:
+    with os.fdopen(fd, 'w', encoding='utf-8', newline='') as stream:
+        stream.write(result)
+        stream.flush()
+        os.fsync(stream.fileno())
+    shutil.copystat(target, temporary)
+    if hasattr(os, 'chown'):
+        os.chown(temporary, stat.st_uid, stat.st_gid)
+        os.chown(backup, stat.st_uid, stat.st_gid)
+    os.replace(temporary, target)
+finally:
+    if os.path.exists(temporary):
+        os.unlink(temporary)
+print('CHANGED')
+`;
+}
+
 function buildManagerRole(){
   return `---
 - name: 安裝前置套件
@@ -1107,24 +1174,31 @@ function buildManagerRole(){
     state: present
     update_cache: true
 
-- name: 寫入 cluster 設定區塊
-  ansible.builtin.blockinfile:
-    path: /var/ossec/etc/ossec.conf
-    marker: "<!-- {mark} ANSIBLE MANAGED CLUSTER BLOCK -->"
-    insertbefore: "</ossec_config>"
-    block: |
-      <cluster>
-        <name>vista-ai-cluster</name>
-        <node_name>{{ inventory_hostname }}</node_name>
-        <node_type>{{ 'master' if inventory_hostname in groups['manager_master'] else 'worker' }}</node_type>
-        <key>{{ cluster_key }}</key>
-        <interval>10s</interval>
-        <port>1516</port>
-        <bind_addr>0.0.0.0</bind_addr>
-        <nodes><node>{{ manager_master_ip }}</node></nodes>
-        <hidden>no</hidden>
-        <disabled>no</disabled>
-      </cluster>
+- name: 準備唯一 cluster 設定
+  ansible.builtin.template:
+    src: cluster.xml.j2
+    dest: /var/ossec/etc/.cluster-desired.xml
+    owner: root
+    group: root
+    mode: "0600"
+  no_log: true
+
+- name: 備份並替換既有 cluster 設定
+  ansible.builtin.script:
+    cmd: "{{ playbook_dir }}/scripts/merge-cluster.py /var/ossec/etc/ossec.conf /var/ossec/etc/.cluster-desired.xml"
+    executable: python3
+  register: cluster_merge
+  changed_when: "'CHANGED' in cluster_merge.stdout_lines"
+  no_log: true
+  notify: restart wazuh-manager
+
+- name: 移除暫存 cluster 設定
+  ansible.builtin.file:
+    path: /var/ossec/etc/.cluster-desired.xml
+    state: absent
+
+- name: 立即套用 cluster 設定
+  ansible.builtin.meta: flush_handlers
 
 - name: 移除可能已存在的一般版 filebeat(避免與 filebeat-oss 衝突,乾淨環境會直接略過)
   ansible.builtin.apt:
@@ -1614,12 +1688,24 @@ server.ssl.key: "/etc/wazuh-dashboard/certs/{{ inventory_hostname }}-key.pem"
 # 品牌客製 (依實際 Wazuh/OpenSearch Dashboards 版本調整參數名稱)
 # opensearchDashboards.branding.applicationTitle: "Vista AI"
 `,
+    'roles/manager/templates/cluster.xml.j2': `<cluster>
+  <name>vista-ai-cluster</name>
+  <node_name>{{ inventory_hostname }}</node_name>
+  <node_type>{{ 'master' if inventory_hostname in groups['manager_master'] else 'worker' }}</node_type>
+  <key>{{ cluster_key }}</key>
+  <port>1516</port>
+  <bind_addr>0.0.0.0</bind_addr>
+  <nodes><node>{{ manager_master_ip }}</node></nodes>
+  <hidden>no</hidden>
+  <disabled>no</disabled>
+</cluster>
+`,
     'roles/dashboard/templates/wazuh.yml.j2': `hosts:
   - default:
-      url: https://{{ agent_connect_address }}
+      url: https://{{ wazuh_api_address }}
       port: 55000
       username: "{{ wazuh_api_user }}"
-      password: "{{ wazuh_api_password }}"
+      password: {{ wazuh_api_password | to_json }}
       run_as: false
 `,
     'roles/loadbalancer/templates/keepalived.conf.j2': `vrrp_script check_haproxy {
@@ -1808,6 +1894,41 @@ function buildVerifyPlaybook(){
   hosts: dashboard
   become: true
   tasks:
+    - name: 驗證 Master API 帳密
+      ansible.builtin.uri:
+        url: "https://{{ wazuh_api_address }}:55000/security/user/authenticate?raw=true"
+        method: POST
+        url_username: "{{ wazuh_api_user }}"
+        url_password: "{{ wazuh_api_password }}"
+        force_basic_auth: true
+        validate_certs: false
+        return_content: true
+        status_code: 200
+      register: api_auth
+      no_log: true
+      retries: 6
+      delay: 10
+      until: api_auth.status == 200
+    - name: 查詢已連線叢集成員
+      ansible.builtin.uri:
+        url: "https://{{ wazuh_api_address }}:55000/cluster/nodes?limit=1000"
+        headers:
+          Authorization: "Bearer {{ api_auth.content | trim }}"
+        validate_certs: false
+        return_content: true
+      register: api_nodes
+      no_log: true
+      retries: 12
+      delay: 10
+      until: >-
+        api_nodes.status == 200 and
+        (groups['manager_master'] + groups.get('manager_worker', [])) | difference(
+        api_nodes.json.data.affected_items | map(attribute='name') | list) | length == 0
+    - name: 確認 API 回報成功
+      ansible.builtin.assert:
+        that:
+          - api_nodes.json.error == 0
+        fail_msg: "API 未成功回傳叢集成員，請檢查 Manager cluster 設定。"
     - name: 確認 443 port 有服務回應
       ansible.builtin.uri:
         url: "https://{{ ansible_host }}:443"
@@ -2223,11 +2344,10 @@ pve_mount_vm "$VMID"
 cat <<'EOF' > /mnt/pve_mount/var/ossec/etc/ossec.conf.cluster-block
 <ossec_config>
   <cluster>
-    <name>wazuh-ha-cluster</name>
+    <name>vista-ai-cluster</name>
     <node_name>${h.name}</node_name>
     <node_type>${i===0?'master':'worker'}</node_type>
     <key>${data.clusterKey}</key>
-    <interval>10m</interval>
     <port>1516</port>
     <bind_addr>0.0.0.0</bind_addr>
     <nodes>
@@ -2238,39 +2358,50 @@ cat <<'EOF' > /mnt/pve_mount/var/ossec/etc/ossec.conf.cluster-block
   </cluster>
 </ossec_config>
 EOF
-# 注意:上面先寫成獨立檔案 ossec.conf.cluster-block,是因為 ossec.conf 其餘內容(規則、解碼器等)
-# 由套件安裝時已經產生,直接整檔覆寫會把那些設定砍掉。實際做法:
-# 用 python3 -c 的簡易 XML 插入,把 <cluster>...</cluster> 區塊塞進既有 ossec.conf 的 <ossec_config> 內、
-# 或人工開檔手動貼上(見 SOP.md 模式 A 段落說明),不建議直接 mv 覆蓋整個 ossec.conf。
+python3 - /mnt/pve_mount/var/ossec/etc/ossec.conf /mnt/pve_mount/var/ossec/etc/ossec.conf.cluster-block <<'PY_CLUSTER'
+${buildClusterMergeScript()}
+PY_CLUSTER
+chmod 600 /mnt/pve_mount/var/ossec/etc/ossec.conf.cluster-block
 pve_unmount_vm "$VMID"
 `).join('\n');
 
   return `#!/bin/bash
 # 03-inject-manager.sh —— 模式 A:PVE 宿主機離線注入 Manager <cluster> 設定區塊
 # 前提:VM 磁碟模板內已預先裝好 wazuh-manager 套件。
-# ⚠️ 這支腳本只產生 <cluster> 區塊到 ossec.conf.cluster-block,不會自動合併進 ossec.conf,
-#    避免覆蓋掉套件安裝時已產生的其餘規則/解碼器設定。合併方式請見 SOP.md 對應章節。
+# 備份正式 ossec.conf 並替換 cluster 區塊，保留其他設定；需要宿主機 python3。
 set -e
 
 ${pveDiskHelperBlock()}
 ${body}
-echo "全部 Manager 節點 cluster 區塊注入完成(尚待合併進 ossec.conf,見 SOP.md)。"
+echo "全部 Manager 節點正式 ossec.conf 已更新；開機後執行 verify.yml 驗證叢集。"
 `;
 }
 
 // 04. Dashboard opensearch_dashboards.yml 離線注入
 function buildInjectDashboardScript(data){
-  const hosts = data.idx.map(h=>`\\"https://${h.ip}:9200\\"`).join(', ');
+  const hosts = data.idx.map(h=>JSON.stringify(`https://${h.ip}:9200`)).join(', ');
   const body = data.dash.map(h => `${vmidWarn(h)}VMID=${h.vmid || '??'}   # ${h.name} (${h.ip})
 pve_mount_vm "$VMID"
-cat <<EOF > /mnt/pve_mount/etc/wazuh-dashboard/opensearch_dashboards.yml
+cat <<'OPENSEARCH_CONFIG' > /mnt/pve_mount/etc/wazuh-dashboard/opensearch_dashboards.yml
 server.port: 443
 server.host: "0.0.0.0"
 opensearch.hosts: [${hosts}]
 opensearch.ssl.verificationMode: none
 opensearch.username: "admin"
-opensearch.password: "${data.opensearchPass}"
-EOF
+opensearch.password: ${JSON.stringify(data.opensearchPass)}
+OPENSEARCH_CONFIG
+install -d -m 0750 /mnt/pve_mount/usr/share/wazuh-dashboard/data/wazuh/config
+cat <<'WAZUH_API_CONFIG' > /mnt/pve_mount/usr/share/wazuh-dashboard/data/wazuh/config/wazuh.yml
+hosts:
+  - default:
+      url: https://${data.mgr[0].ip}
+      port: 55000
+      username: "wazuh-wui"
+      password: ${JSON.stringify(data.wazuhApiPassword)}
+      run_as: false
+WAZUH_API_CONFIG
+chroot /mnt/pve_mount chown wazuh-dashboard:wazuh-dashboard /usr/share/wazuh-dashboard/data/wazuh/config /usr/share/wazuh-dashboard/data/wazuh/config/wazuh.yml
+chmod 0640 /mnt/pve_mount/usr/share/wazuh-dashboard/data/wazuh/config/wazuh.yml
 pve_unmount_vm "$VMID"
 `).join('\n');
 
@@ -2303,15 +2434,25 @@ defaults
     timeout client 50s
     timeout server 50s
 frontend wazuh_agent_1514
-    bind ${data.needsVip ? data.vip : h.ip}:1514
+    bind *:1514
     mode tcp
     default_backend wazuh_managers_1514
 backend wazuh_managers_1514
     mode tcp
     balance roundrobin
 ${mgrBackends}
+frontend wazuh_auth_1515
+    bind *:1515
+    default_backend wazuh_master_1515
+backend wazuh_master_1515
+    server master ${data.mgr[0].ip}:1515 check
+frontend wazuh_api_55000
+    bind *:55000
+    default_backend wazuh_master_55000
+backend wazuh_master_55000
+    server master ${data.mgr[0].ip}:55000 check
 frontend wazuh_dashboard_frontend
-    bind ${data.needsVip ? data.vip : h.ip}:443
+    bind *:443
     mode tcp
     default_backend wazuh_dashboard_backend
 backend wazuh_dashboard_backend
@@ -2684,7 +2825,7 @@ sudo apt install -y wazuh-manager
 sudo systemctl enable wazuh-manager
 \`\`\`
 
-在 \`/var/ossec/etc/ossec.conf\` 的 \`</ossec_config>\` 前插入:
+先備份 \`/var/ossec/etc/ossec.conf\`。用以下內容**取代既有的完整 <cluster> 區塊**，若有重複區塊請一併移除；最後必須只剩一份。保留其他設定，不要直接追加第二份 cluster:
 
 \`\`\`xml
 <cluster>
@@ -2692,7 +2833,6 @@ sudo systemctl enable wazuh-manager
   <node_name>${h.name}</node_name>
   <node_type>${i===0 ? 'master' : 'worker'}</node_type>
   <key>${data.clusterKey}</key>
-  <interval>10s</interval>
   <port>1516</port>
   <bind_addr>0.0.0.0</bind_addr>
   <nodes><node>${mgrMasterIp}</node></nodes>
@@ -2792,10 +2932,10 @@ server.ssl.key: "/etc/wazuh-dashboard/certs/${h.name}-key.pem"
 \`\`\`yaml
 hosts:
   - default:
-      url: https://${agentConnectAddress}
+      url: https://${mgrMasterIp}
       port: 55000
       username: wazuh-wui
-      password: wazuh-wui
+      password: ${JSON.stringify(data.wazuhApiPassword)}
       run_as: false
 \`\`\`
 
@@ -2963,7 +3103,8 @@ ${hostsTable()}
 - SSH 帳號: \`${data.sshUser}\`(密碼${data.sshPass ? '已於產生設定包時填寫,请見 group_vars/all.yml' : '留空,部署時互動輸入'})
 - 叢集金鑰(cluster_key): \`${data.clusterKey}\`
 - OpenSearch/Dashboard admin 密碼: \`${data.opensearchPass}\`
-- Agent / Dashboard API 連線位址: \`${agentConnectAddress}\`${data.needsVip ? '(VIP,由 Keepalived 在 LB 間漂移)' : '(單台 LB 的 IP,沒有 VIP)'}
+- Dashboard API 連線位址: \`${mgrMasterIp}:55000\`（直接連 Master）
+- Agent 連線位址: \`${agentConnectAddress}\`${data.needsVip ? '(VIP,由 Keepalived 在 LB 間漂移)' : '(單台 LB 的 IP,沒有 VIP)'}
 
 ## 2. 系統架構
 
@@ -3133,7 +3274,7 @@ ${data.nids.length ? `| 8 | NIDS 監聽介面混雜模式 | \`ip link show "$MIR
 - NIDS 監聽介面編號因主機而異,不能寫死,務必依「## ${b+7}. NIDS」段落的自動偵測腳本現場確認,不要用猜的。
 - 批次腳本(尤其之後若改用 Ansible/自動化)每次改動前,務必對照第 1 節的完整主機清單,確認目標涵蓋所有節點——漏掉 LB/VIP 這類容易被忽略的輔助元件,是最常見的踩坑之一。
 - 部署完成後,\`opensearch_admin_password\`(目前是 \`${data.opensearchPass}\`)與 Dashboard API 的
-  \`wazuh-wui\`/\`wazuh-wui\`(目前仍是官方預設值)都建議儘快透過 \`wazuh-passwords-tool.sh\` 更新為
+  \`wazuh-wui\` API 密碼（使用表單填入的現有值）都應透過 \`wazuh-passwords-tool.sh\` 管理並同步更新設定，改為
   正式密碼,不要長期沿用這裡產生的初始值。
 ${data.platform==='pve' ? `- 執行 \`netplan apply\` 那一瞬間網卡 IP 會改變,若你是透過現在這條 SSH 連線去執行,連線本身可能當場卡死或斷線——這不是失敗,是正常現象,重新用新 IP 連回去即可;不確定的話優先用「模式 A」離線磁碟注入,完全不會遇到這個問題。
 - \`sudo\` 在沒有 Pseudo-TTY(例如某些非互動式批次執行方式)的情況下,遇到需要輸入密碼的提權會直接被系統拒絕退回,不會等你輸入;建議搭配 \`ssh -t\` 或先完成本節「SSH 金鑰部署」改用金鑰,避免密碼提權這個坑。
@@ -3147,6 +3288,7 @@ function readForm(){
   const customerName = document.getElementById('customerName').value.trim() || 'customer';
   const sshUser = document.getElementById('sshUser').value.trim() || 'ansible';
   const sshPass = document.getElementById('sshPass').value;
+  const wazuhApiPassword = document.getElementById('wazuhApiPassword').value;
   let clusterKey = document.getElementById('clusterKey').value.trim();
   if(!clusterKey) clusterKey = randomHex(32);
   const vip = document.getElementById('vipAddr').value.trim();
@@ -3165,7 +3307,7 @@ function readForm(){
   const allInOneVmid = document.getElementById('allInOneVmid')?.value.trim() || '';
 
   return {
-    customerName, sshUser, sshPass, clusterKey, vip, vipCidr, dnsServer, gateway, platform, opensearchPass, needsVip,
+    customerName, sshUser, sshPass, wazuhApiPassword, clusterKey, vip, vipCidr, dnsServer, gateway, platform, opensearchPass, needsVip,
     idx: collectHosts('idx'),
     mgr: collectHosts('mgr'),
     dash: collectHosts('dash'),
@@ -3184,6 +3326,15 @@ function validate(data){
   }
   if(!data.idx.length) errs.push('至少需要 1 台 Indexer 且填妥主機名稱與 IP');
   if(!data.mgr.length) errs.push('至少需要 1 台 Manager 且填妥主機名稱與 IP');
+  if(!data.wazuhApiPassword) errs.push('請填寫 Manager 現有的 wazuh-wui API 密碼');
+  if([data.idx, data.mgr, data.dash, data.lb, data.nids].some(hosts=>hosts.incomplete)) errs.push('有主機名稱或 IP 尚未填妥；請補齊或移除該主機，避免意外更換 Master');
+  if(!/^[A-Za-z0-9_]{32}$/.test(data.clusterKey)) errs.push('叢集 key 必須是 32 個英數字或底線');
+  const hosts = [...data.idx, ...data.mgr, ...data.dash, ...data.lb, ...data.nids];
+  if(new Set(hosts.map(h=>h.name)).size !== hosts.length) errs.push('主機名稱不可重複');
+  for(const h of hosts){
+    if(!/^[A-Za-z0-9][A-Za-z0-9_.-]*$/.test(h.name)) errs.push('主機名稱格式不正確: '+h.name);
+    if(!/^(?:\d{1,3}\.){3}\d{1,3}$/.test(h.ip) || h.ip.split('.').some(x=>Number(x)>255)) errs.push('請填寫有效 IPv4: '+h.name);
+  }
   if(data.needsVip && !data.vip) errs.push('LB 有 2 台以上,需填寫 VIP');
   return errs;
 }
@@ -3496,6 +3647,7 @@ async function generatePackage(){
   root.folder('group_vars').file('all.yml', buildGroupVars(data));
   root.file('site.yml', buildSitePlaybook());
   root.file('verify.yml', buildVerifyPlaybook());
+  root.folder('scripts').file('merge-cluster.py', buildClusterMergeScript());
   root.file('deploy.sh', buildDeploySh(data.customerName, data.platform));
   if(data.platform === 'pve'){
     root.file('00-set-static-ip.sh', buildPveStage0Script(data));
